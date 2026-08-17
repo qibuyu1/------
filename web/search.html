@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#2563eb" />
+  <title>新闻与论文查询 · 数据要素治理</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="/index.html"><span class="brand-symbol">数据要素治理</span><span class="brand-sub">研究与内容生产平台</span></a>
+    <button class="mobile-menu" id="mobileMenuButton" aria-label="展开导航">☰</button>
+    <nav class="site-nav" aria-label="主导航"><a href="/index.html">首页</a><a href="/search.html">新闻与论文查询</a><a href="/compose.html">自动生成推文</a></nav>
+    <button class="service-status" id="serviceStatus" type="button"><span class="service-dot"></span><span>检测服务</span></button>
+  </header>
+
+  <main class="workspace-main research-page">
+    <div class="workspace-titlebar page-width">
+      <div><a class="back-link" href="/index.html">← 首页</a><h1>数据要素资料检索</h1><span>国内权威来源优先，国际资料补充</span></div>
+      <a class="header-action" href="/compose.html">去生成推文 →</a>
+    </div>
+
+    <div class="research-shell page-width">
+      <aside class="search-sidebar" aria-label="查询设置">
+        <div class="sidebar-heading"><strong>查询设置</strong><button id="resetFilters" type="button">恢复默认</button></div>
+
+        <label class="field-block"><span>主题 / 关键词</span><textarea id="queryInput" rows="3" autocomplete="off" placeholder="例如：可信数据空间、公共数据授权运营、数据资产入表"></textarea></label>
+        <label class="field-block"><span>附加描述 <i>可选，建议填写</i></span><textarea id="searchDescription" rows="4" autocomplete="off" placeholder="例如：关注数据要素对企业和个人的实际价值；优先近30天国家数据局、地方政策和国内权威媒体，补充典型案例；排除泛泛的数字化报道。"></textarea><small class="field-hint">描述可包含关注对象、地区、行业、时间、来源偏好和排除项。</small></label>
+        <div class="quick-topics" id="quickTopics"><button data-q="可信数据空间">可信数据空间</button><button data-q="公共数据授权运营">公共数据</button><button data-q="数据资产入表">数据资产入表</button><button data-q="数据要素 人工智能">数据要素 × AI</button></div>
+
+        <fieldset><legend>查询来源</legend><div class="choice-grid"><label class="check-row"><input type="checkbox" name="sourceType" value="news" checked><span>新闻</span></label><label class="check-row"><input type="checkbox" name="sourceType" value="policy" checked><span>政策</span></label><label class="check-row"><input type="checkbox" name="sourceType" value="paper" checked><span>论文</span></label></div></fieldset>
+
+        <fieldset><legend>地区范围</legend><select id="regionPreference"><option value="domestic-first" selected>国内优先，国际补充</option><option value="domestic-only">仅国内来源</option><option value="domestic+global">国内外对照</option><option value="global-first">国际优先，国内补充</option><option value="global-only">仅国际来源</option></select><p class="field-hint">默认至少四分之三结果来自国内；资料不足时自动补齐。</p></fieldset>
+
+        <fieldset><legend>时间范围</legend>
+          <select id="timeRange">
+            <option value="latest" selected>最新（默认）</option>
+            <option value="day">近 24 小时</option><option value="week">近 7 天</option><option value="month">近 30 天</option><option value="quarter">近 3 个月</option><option value="year">近 1 年</option><option value="custom">自定义日期</option><option value="all">不限时间</option>
+          </select>
+          <p class="field-hint">“最新”不会硬性删掉旧资料：先查符合主题的内容，再默认把较新的结果排在前面。</p>
+          <div class="custom-date-range" id="customDateRange" hidden><label><span>开始</span><input type="date" id="dateFrom"></label><label><span>结束</span><input type="date" id="dateTo"></label></div>
+        </fieldset>
+
+        <fieldset><legend>结果数量</legend><select id="maxResults"><option value="12">12 条</option><option value="20" selected>20 条</option><option value="30">30 条</option><option value="40">40 条</option></select></fieldset>
+
+        <details class="advanced-filter"><summary>高级筛选</summary><div class="advanced-body"><label class="check-row"><input id="openAccessOnly" type="checkbox"><span>论文仅看开放获取</span></label><label class="check-row"><input id="abstractOnly" type="checkbox"><span>只看有摘要的资料</span></label><label class="range-label"><span>最低综合价值 <b id="scoreValue">0</b></span><input id="minScore" type="range" min="0" max="90" value="0" step="5"></label></div></details>
+
+        <button class="primary-button search-submit" id="searchButton" type="button"><span>开始查询</span><b>→</b></button>
+        <button class="cancel-button" id="cancelSearchButton" type="button" hidden>停止本次查询</button>
+      </aside>
+
+      <section class="results-panel">
+        <div class="results-header"><div><strong id="resultTitle">查询结果</strong><span id="resultMeta">尚未开始查询</span></div><div class="result-tools"><button id="autoPick" type="button" disabled>自动选高价值来源</button><button id="clearSelection" type="button">清空已选</button></div></div>
+
+        <div class="results-filterbar" id="resultsFilterbar">
+          <label><span>结果内筛选</span><select id="resultTypeFilter"><option value="all">全部来源</option><option value="news">只看新闻</option><option value="policy">只看政策</option><option value="paper">只看论文</option></select></label>
+          <label class="result-keyword"><span>关键词</span><input id="resultKeyword" placeholder="在当前结果中再筛一次" /></label>
+          <label><span>排序依据</span><select id="resultSort"><option value="score" selected>综合匹配</option><option value="time">发布时间</option><option value="impact">引用 / 阅读量</option><option value="authority">来源权威度</option></select></label>
+          <label><span>顺序</span><select id="sortDirection"><option value="desc" selected>降序（高 / 新 → 低 / 旧）</option><option value="asc">升序（低 / 旧 → 高 / 新）</option></select></label>
+        </div>
+
+        <div class="journey-progress" id="searchProgress" hidden>
+          <div class="journey-top"><strong id="searchProgressTitle">正在查询</strong><span id="searchProgressPercent">0%</span></div>
+          <div class="sailing-track"><div class="sailing-fill" id="searchProgressFill"></div><div class="sailboat" id="searchBoat" aria-hidden="true"><svg viewBox="0 0 44 32"><path d="M8 24h28c-2 5-7 7-14 7S10 29 8 24Z"></path><path d="M21 3v20"></path><path d="M20 5 9 21h11Z"></path><path d="m23 7 11 14H23Z"></path></svg></div></div>
+          <p id="searchProgressText">正在准备检索条件…</p>
+        </div>
+
+        <div class="research-answer" id="researchAnswer" hidden></div>
+        <div class="result-list" id="resultList">
+          <div class="blank-results initial-state"><div class="empty-face">( •̀ ω •́ )✧</div><strong>输入主题，开始检索</strong><p>系统将优先查询国内政策、权威媒体、产业实践和中文论文，并补充相关国际资料。</p></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="selection-bar" id="selectionBar" hidden><div><strong>已引用 <span id="selectionCount">0</span> 条资料</strong><span id="selectionTypes">会带到推文生成页</span></div><button id="toCompose" class="primary-button" type="button">用这些资料生成推文 →</button></div>
+  <script src="/common.js" defer></script>
+  <script src="/search.js" defer></script>
+</body>
+</html>

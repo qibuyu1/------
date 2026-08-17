@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="数据要素新闻、政策、论文检索与公众号推文自动生成" />
+  <meta name="theme-color" content="#2563eb" />
+  <title>数据要素治理 · 研究与内容生产平台</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="/index.html"><span class="brand-symbol">数据要素治理</span><span class="brand-sub">研究与内容生产平台</span></a>
+    <button class="mobile-menu" id="mobileMenuButton" aria-label="展开导航">☰</button>
+    <nav class="site-nav" aria-label="主导航">
+      <a href="/index.html">首页</a>
+      <a href="/search.html">新闻与论文查询</a>
+      <a href="/compose.html">自动生成推文</a>
+    </nav>
+    <button class="service-status" id="serviceStatus" type="button"><span class="service-dot"></span><span>检测服务</span></button>
+  </header>
+
+  <main class="home-main">
+    <section class="news-carousel" aria-label="最新新闻与论文推荐">
+      <div class="carousel-label page-width">
+        <span>最新推荐</span><strong>国内优先 · 国际补充</strong>
+        <a href="/feed.html">查看全部推荐 →</a>
+      </div>
+      <div class="carousel-stage">
+        <button class="carousel-arrow prev" id="carouselPrev" type="button" aria-label="上一条推荐">‹</button>
+        <div class="carousel-viewport" id="carouselViewport">
+          <div class="carousel-track" id="carouselTrack">
+            <article class="feed-slide loading-slide">
+              <div class="feed-copy"><div class="feed-meta"><span class="feed-type">正在更新</span></div><h2>正在整理近期数据要素动态</h2><p>优先汇集国内政策、权威报道、产业实践与中文研究。</p></div>
+            </article>
+          </div>
+        </div>
+        <button class="carousel-arrow next" id="carouselNext" type="button" aria-label="下一条推荐">›</button>
+      </div>
+      <div class="carousel-bottom page-width">
+        <div class="carousel-dots" id="carouselDots" aria-label="轮播导航"></div>
+        <span class="carousel-motion-hint">自动轮播 · 可左右滑动</span>
+      </div>
+      <div class="carousel-progress page-width" aria-hidden="true"><i id="carouselLine"></i></div>
+    </section>
+
+    <section class="home-purpose page-width">
+      <h1>聚合数据要素新闻、政策与论文，并自动生成带配图、可直接导出的公众号推文。</h1>
+    </section>
+
+    <section class="feature-list page-width" aria-label="主要功能">
+      <article class="feature-row feature-search">
+        <div class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48"><circle cx="20" cy="20" r="11"></circle><path d="m28 28 11 11"></path><path d="M14 20h12M20 14v12"></path></svg>
+        </div>
+        <div class="feature-copy"><span>资料检索</span><h2>新闻与论文查询</h2><p>输入主题，自定义来源、时间、排序和精细筛选，在独立结果区查看并选择证据。</p></div>
+        <a class="feature-enter" href="/search.html"><span>进入查询</span><b>→</b></a>
+      </article>
+
+      <article class="feature-row feature-compose">
+        <div class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48"><path d="M10 8h21l7 7v25H10z"></path><path d="M31 8v8h7M16 23h16M16 29h16M16 35h10"></path><path d="m37 23 3-3 3 3-3 3z"></path></svg>
+        </div>
+        <div class="feature-copy"><span>内容生成</span><h2>自动生成公众号推文</h2><p>自动组织资料、调用 DeepSeek 写作，再按段落语义找图并插入正文，可导出 Word 与 PDF。</p></div>
+        <a class="feature-enter" href="/compose.html"><span>进入生成</span><b>→</b></a>
+      </article>
+    </section>
+  </main>
+
+  <footer class="site-footer page-width"><span>数据要素治理</span><span>数据要素研究与内容生产</span></footer>
+  <script src="/common.js" defer></script>
+  <script src="/home.js" defer></script>
+</body>
+</html>

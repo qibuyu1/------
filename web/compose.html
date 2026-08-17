@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#2563eb" />
+  <title>自动生成推文 · 数据要素治理</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="/index.html"><span class="brand-symbol">数据要素治理</span><span class="brand-sub">研究与内容生产平台</span></a>
+    <button class="mobile-menu" id="mobileMenuButton" aria-label="展开导航">☰</button>
+    <nav class="site-nav" aria-label="主导航"><a href="/index.html">首页</a><a href="/search.html">新闻与论文查询</a><a href="/compose.html">自动生成推文</a></nav>
+    <button class="service-status" id="serviceStatus" type="button"><span class="service-dot"></span><span>检测服务</span></button>
+  </header>
+
+  <main class="workspace-main compose-page">
+    <div class="workspace-titlebar page-width wide-width">
+      <div><a class="back-link" href="/index.html">← 首页</a><h1>自动生成公众号推文</h1><span>证据、写作、配图、修改和导出都在这里完成</span></div>
+      <a class="header-action" href="/search.html">先查询资料 →</a>
+    </div>
+
+    <div class="compose-workspace page-width wide-width">
+      <section class="compose-settings">
+        <div class="settings-section">
+          <div class="settings-title"><span>01</span><div><strong>主题与证据</strong><small>查询页选中的资料会显示“已引用”；也可以直接上传文件。</small></div></div>
+          <label class="full-field"><span>文章主题</span><input id="topicInput" value="数据要素" placeholder="例如：公共数据授权运营进入规模化阶段意味着什么？" /></label>
+          <label class="full-field"><span>写作切口 / 用户实际要求 <i>重点：请像给编辑下任务一样说</i></span><textarea id="angleInput" rows="4" placeholder="例如：不要泛泛解释数据要素，要回答为什么今年企业开始从‘数据资源’转向‘数据资产’，重点比较政策变化和企业实际决策，最好加入一个真实案例，但不要夸大；读者是非技术管理者，结尾给出3个值得持续观察的信号。"></textarea><small class="field-hint">这段话会被当作最高优先级编辑简报：系统会理解你的真实目的，再决定标题、开头、论证顺序、材料取舍和结尾。</small></label>
+
+          <div class="upload-zone" id="uploadZone" tabindex="0" role="button" aria-label="上传参考资料">
+            <input id="fileInput" type="file" multiple accept=".txt,.md,.csv,.json,.html,.htm,.docx,.pdf" hidden />
+            <div class="upload-icon">↑</div><div><strong>上传参考文件</strong><p>拖进来或点击选择：PDF / Word / TXT / Markdown / CSV / JSON / HTML，单个 ≤ 12MB</p></div>
+          </div>
+
+          <div class="toggle-stack evidence-switch"><label class="toggle-row"><span><strong>自动补充佐证资料</strong><small>开启：没有上传或引用资料时，会按“主题 + 写作切口”自动检索新闻 / 政策 / 论文，并把实际采用的资料同步显示到“当前证据”；关闭：只使用你已引用或上传的材料。</small></span><input id="autoEvidenceToggle" type="checkbox" checked><i></i></label></div>
+          <div class="source-manager"><div class="source-manager-head"><div><strong>当前证据</strong><span id="sourceCount">0 条</span></div><div><button id="autoSourceButton" type="button">现在补全</button><a href="/search.html">精细选择</a></div></div><div id="sourceList" class="compose-source-list"></div></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title"><span>02</span><div><strong>写作策略</strong><small>不仅选“风格”，还控制开头、节奏、证据表达和编辑强度。</small></div></div>
+          <div class="form-grid two-col">
+            <label><span>文章类型</span><select id="styleSelect"><option>行业观察</option><option>政策解读</option><option>学术科普</option><option>热点评论</option><option>研究简报</option><option>趋势分析</option><option>案例拆解</option></select></label>
+            <label><span>目标读者</span><select id="audienceSelect"><option>产业与政策关注者</option><option>企业管理者</option><option>数据从业者</option><option>研究人员</option><option>高校学生</option><option>普通公众</option></select></label>
+            <label><span>文章篇幅</span><select id="lengthSelect"><option>短篇 · 1000—1400字</option><option selected>中篇 · 1800—2400字</option><option>长篇 · 2800—3600字</option><option>深度长文 · 4000字左右</option></select></label>
+            <label><span>语言语气</span><select id="toneSelect"><option>理性、清晰</option><option>专业、克制</option><option>通俗、易读</option><option>锐利、有判断</option><option>学术、严谨</option><option>叙事感更强</option></select></label>
+            <label><span>标题偏好</span><select id="titleMode"><option selected>默认 · 自然起题</option><option>公众号吸引力型</option><option>问题型</option><option>趋势判断型</option><option>政策解读型</option><option>克制的吸引力</option><option>信息密度型</option></select></label>
+            <label><span>文章结构</span><select id="structureSelect"><option selected>默认 · 按内容自然组织</option><option>问题—机制—案例—趋势</option><option>现象—原因—影响—建议</option><option>政策—产业—技术—风险</option><option>结论先行—证据展开—观察</option><option>由模型按证据自动组织</option></select></label>
+            <label><span>开头方式</span><select id="openerSelect"><option selected>默认 · 选择最自然切口</option><option>变化/矛盾切入</option><option>关键事实切入</option><option>真实场景切入</option><option>问题切入</option><option>结论先行</option></select></label>
+            <label><span>段落节奏</span><select id="rhythmSelect"><option selected>默认 · 随内容调整</option><option>短中段交替</option><option>紧凑短段</option><option>深度长段</option><option>由内容自动调整</option></select></label>
+            <label><span>证据表达</span><select id="evidenceStyle"><option selected>默认 · 自然融入证据</option><option>事实与判断分开</option><option>证据紧跟结论</option><option>学术引用更明显</option><option>弱化编号、增强可读性</option></select></label>
+            <label><span>结尾方式</span><select id="closingMode"><option selected>默认 · 自然收束</option><option>观察清单</option><option>未来趋势</option><option>行动建议</option><option>开放问题</option><option>简短总结</option></select></label>
+            <label><span>生成质量</span><select id="qualityMode"><option value="auto" selected>默认 · 自动平衡</option><option value="standard">快速高质量</option><option value="deep">深度精修 · 双阶段</option></select></label>
+          </div>
+          <div class="toggle-stack"><label class="toggle-row"><span><strong>智能小节（按需）</strong><small>只在确实能帮助阅读时才加小标题；允许整篇连续叙述，也不会固定拆成“问题 / 做法 / 机制 / 影响 / 判断”之类提纲。</small></span><input id="smartSectionsToggle" type="checkbox" checked><i></i></label><label class="toggle-row"><span><strong>严格抑制 AI 套话</strong><small>减少模板句、空话和机械过渡</small></span><input id="clicheToggle" type="checkbox" checked><i></i></label></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title"><span>03</span><div><strong>自动配图与可信度</strong><small>图片会直接进入正文，也会嵌入 Word / PDF。</small></div></div>
+          <div class="form-grid two-col">
+            <label><span>正文配图 <small class="field-note">封面图不计入数量</small></span><select id="imageCount"><option value="0">正文不配图（仍生成封面）</option><option value="1">1 张</option><option value="2">2 张</option><option value="3" selected>3 张</option><option value="4">4 张</option><option value="5">5 张</option><option value="custom">自定义</option></select><input id="customImageCount" class="custom-number" type="number" min="0" max="8" value="3" hidden aria-label="自定义正文配图数量"></label>
+            <label><span>图片偏好</span><select id="imagePreference"><option>混合</option><option>真实产业场景</option><option>政策发布与机构活动</option><option>数据基础设施与机房</option><option>图表与信息图</option><option>城市与数字经济场景</option></select></label>
+            <label><span>匹配精度</span><select id="imageMatchMode"><option value="precise" selected>精准匹配（默认）</option><option value="balanced">均衡匹配</option></select></label>
+            <label><span>图片来源</span><select id="imageSourcePolicy"><option value="balanced">相关性优先</option><option value="authority">原始报道 / 权威来源优先</option></select></label>
+          </div>
+          <div class="image-provider-status" id="imageProviderStatus"><span class="mini-spinner"></span><div><strong>正在检测图片搜索服务</strong><small>图片检索统一使用 Serper / Google Images；新闻与政策仍由 Tavily 负责。</small></div></div>
+          <div class="toggle-stack"><label class="toggle-row"><span><strong>正文标注来源编号</strong><small>默认不标；需要严谨溯源时再开启 [1][2]</small></span><input id="citationToggle" type="checkbox"><i></i></label><label class="toggle-row"><span><strong>事实核验提醒</strong><small>标记需要人工再确认的内容</small></span><input id="factToggle" type="checkbox" checked><i></i></label></div>
+        </div>
+
+        <div class="generation-api-status" id="generationApiStatus"><span class="mini-spinner"></span><div><strong>正在检测 DeepSeek 写作服务</strong><small>默认优先快速生成；只有本地质量检查未达标才追加修复。生成后显示真实 API 调用次数与 Token 用量。</small></div></div>
+        <button class="generate-main" id="generateButton" type="button"><span><small>DEEPSEEK 实时生成</small><strong>生成完整图文推文</strong></span><b>→</b></button>
+        <button class="cancel-button" id="cancelGenerateButton" type="button" hidden>停止本次生成</button>
+      </section>
+
+      <section class="article-side">
+        <div class="article-toolbar"><div class="preview-tabs"><button class="active" data-tab="preview">文章预览</button><button data-tab="insights">生成分析</button><button data-tab="visuals">配图与来源</button></div><div class="export-menu"><button id="reviseButton" disabled>再次修改</button><button id="copyButton" disabled>复制公众号 HTML</button></div></div>
+
+        <div class="revision-panel" id="revisionPanel" hidden>
+          <div class="revision-head"><div><strong>再次修改</strong><span id="revisionTargetLabel">默认修改整篇文章</span></div><button id="closeRevision" type="button">×</button></div>
+          <div class="revision-grid">
+            <label><span>修改范围</span><select id="revisionScope"><option value="paragraph">选中段落</option><option value="sentence">选中语句 / 划词</option><option value="section">所在章节</option><option value="whole">整篇文章</option></select></label>
+            <label class="revision-instruction"><span>修改要求</span><textarea id="revisionInstruction" rows="3" placeholder="例如：这一段太学术，保留事实和来源，把语言改得更自然；或整篇加强产业判断，删掉重复内容。"></textarea></label>
+          </div>
+          <div class="revision-selection" id="revisionSelection">提示：可以直接点击正文段落；想改一句话时，先在正文里划选文字。</div>
+          <div class="revision-actions"><label class="mini-check"><input id="refreshImagesToggle" type="checkbox" checked>结构变化时重新匹配配图</label><div><button id="undoRevision" type="button" disabled>撤回上一次</button><button id="restoreOriginal" type="button">恢复初稿</button><button id="applyRevision" class="primary-button" type="button">按要求修改</button></div></div>
+        </div>
+
+        <div class="export-dock" id="exportDock">
+          <div><strong>导出成品</strong><span>生成完成后，Word / PDF 会直接带上正文图片与当前标题。</span></div>
+          <div class="export-dock-actions"><button id="docxButton" class="export-word" disabled><b>W</b><span>导出 Word<small>.docx</small></span></button><button id="pdfButton" class="export-pdf" disabled><b>PDF</b><span>导出 PDF<small>可直接发送</small></span></button><button id="htmlButton" class="export-secondary" disabled>HTML</button><button id="mdButton" class="export-secondary" disabled>Markdown</button></div>
+        </div>
+
+        <div class="journey-progress compose-progress" id="composeProgress" hidden>
+          <div class="journey-top"><strong id="composeProgressTitle">正在生成</strong><span id="composeProgressPercent">0%</span></div>
+          <div class="sailing-track"><div class="sailing-fill" id="composeProgressFill"></div><div class="sailboat" id="composeBoat" aria-hidden="true"><svg viewBox="0 0 44 32"><path d="M8 24h28c-2 5-7 7-14 7S10 29 8 24Z"></path><path d="M21 3v20"></path><path d="M20 5 9 21h11Z"></path><path d="m23 7 11 14H23Z"></path></svg></div></div>
+          <p id="composeProgressText">正在准备生成任务…</p>
+        </div>
+
+        <div class="tab-panel active" id="tab-preview"><article class="article-preview" id="articlePreview"><div class="article-empty"><div class="empty-face">( •̀ ω •́ )✧</div><strong>完整图文稿会出现在这里</strong><p>生成后可以点选段落继续改稿，图片会同步进入 Word 与 PDF。</p></div></article></div>
+        <div class="tab-panel" id="tab-insights"><div class="insight-panel" id="insightPanel"><div class="article-empty"><div class="empty-face">(｡･ω･｡)</div><strong>生成后查看标题候选、风险提醒与核心判断</strong></div></div></div>
+        <div class="tab-panel" id="tab-visuals"><div class="insight-panel" id="visualPanel"><div class="article-empty"><div class="empty-face">(￣▽￣)ノ</div><strong>生成后查看配图位置与参考来源</strong></div></div></div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/common.js" defer></script>
+  <script src="/compose.js" defer></script>
+</body>
+</html>

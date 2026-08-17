@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#2563eb" />
+  <title>全部推荐 · 数据要素治理</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="/index.html"><span class="brand-symbol">数据要素治理</span><span class="brand-sub">研究与内容生产平台</span></a>
+    <button class="mobile-menu" id="mobileMenuButton" aria-label="展开导航">☰</button>
+    <nav class="site-nav" aria-label="主导航"><a href="/index.html">首页</a><a href="/search.html">新闻与论文查询</a><a href="/compose.html">自动生成推文</a></nav>
+    <button class="service-status" id="serviceStatus" type="button"><span class="service-dot"></span><span>检测服务</span></button>
+  </header>
+
+  <main class="feed-page page-width">
+    <div class="feed-page-head">
+      <div><a class="back-link" href="/index.html">← 首页</a><h1>最新推荐</h1><p>首页轮播中的新闻、政策和论文都在这里，真实来源可直接打开。</p></div>
+      <a class="header-action" href="/search.html">按主题查询 →</a>
+    </div>
+    <div class="feed-filterline" id="feedFilters">
+      <button class="active" data-type="all">全部</button><button data-type="news">新闻</button><button data-type="policy">政策</button><button data-type="paper">论文</button>
+      <span id="feedStatus">正在更新推荐…</span>
+    </div>
+    <section class="feed-all-list" id="feedAllList">
+      <div class="blank-results initial-state"><div class="empty-mark">更新中</div><strong>正在整理最新推荐</strong><p>国内政策、权威报道、产业实践与中文论文将优先展示。</p></div>
+    </section>
+  </main>
+  <script src="/common.js" defer></script>
+  <script src="/feed.js" defer></script>
+</body>
+</html>
