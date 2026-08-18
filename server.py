@@ -20,6 +20,7 @@ from app.file_ingest import FileIngestError, ingest_file
 from app.image_fetch import ImageFetchError, fetch_image
 from app.home_feed import home_feed
 from app.pipeline import generate_article, research, restore_original, revise_article, undo_revision
+from app.generation_jobs import generation_jobs
 from app.tavily import available as tavily_available
 
 ROOT = Path(__file__).resolve().parent
@@ -27,7 +28,7 @@ WEB_ROOT = ROOT / "web"
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DataElementGovernance/30.0"
+    server_version = "DataElementGovernance/31.0"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
@@ -38,7 +39,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "service": "数据要素治理",
-                    "version": "30.0",
+                    "version": "31.0",
                     "tavilyConfigured": tavily_available(),
                     "deepseekConfigured": deepseek_available(),
                     "deepseekModel": settings.deepseek_model if deepseek_available() else None,
@@ -58,6 +59,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/image":
             self._proxy_image(parsed.query)
+            return
+        if path.startswith("/api/generation/"):
+            job_id = path.rsplit("/", 1)[-1].strip()
+            job = generation_jobs.get(job_id)
+            if not job:
+                self._json({"error": "生成任务已过期，请重新生成。"}, status=410)
+            else:
+                self._json(job)
             return
         if path.startswith("/api/article/"):
             article_id = path.rsplit("/", 1)[-1].strip()
@@ -102,7 +111,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(research(payload))
                 return
             if path == "/api/generate":
-                self._json(generate_article(payload))
+                # Never keep the browser/proxy connection open for the full LLM
+                # generation. DeepSeek/source hydration can legitimately exceed a
+                # reverse proxy's ~100s timeout, which previously surfaced as 524
+                # even though the worker was still healthy.
+                self._json(generation_jobs.start(payload, generate_article), status=202)
+                return
+            if path == "/api/generation/cancel":
+                job_id = str(payload.get("generationJobId") or "").strip()
+                self._json({"ok": generation_jobs.cancel(job_id), "generationJobId": job_id})
                 return
             if path == "/api/revise":
                 self._json(revise_article(payload))
@@ -267,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((settings.host, settings.port), Handler)
-    print("\n数据要素治理 V30.0")
+    print("\n数据要素治理 V31.0")
     print(f"  http://{settings.host}:{settings.port}")
     print(f"  Tavily: {'configured' if tavily_available() else 'NOT CONFIGURED'}")
     print(f"  DeepSeek: {settings.deepseek_model if deepseek_available() else 'NOT CONFIGURED (generation disabled)'}")

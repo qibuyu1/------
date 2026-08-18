@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline quality/efficiency guard for V30.
+"""Offline quality/efficiency guard for V31.
 
 No external API keys or network calls are used. It checks the local semantic gate,
 provider-call budgets, prompt size proxy, source-first image behavior, and hybrid code-visual routing so future
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 # Allow `python scripts/quality_benchmark.py` from the project root.  V27 only
@@ -20,6 +21,7 @@ if str(ROOT) not in sys.path:
 from unittest.mock import patch
 
 from app import deepseek, pipeline, serper_images, serper_search, tavily, visuals
+from app.generation_jobs import GenerationJobStore
 from app.image_fetch import ImageProfile
 from app.query_intent import local_plan
 
@@ -178,6 +180,28 @@ def hybrid_visual_routing_budget() -> dict:
     }
 
 
+
+def generation_coordination() -> dict:
+    store = GenerationJobStore(max_items=4, ttl_seconds=60, workers=1)
+    def slow_worker(payload):
+        time.sleep(0.16)
+        return {"articleId": "benchmark", "markdown": "正文", "recommendedTitle": payload.get("query", "测试")}
+    started = time.perf_counter()
+    job = store.start({"query": "异步生成"}, slow_worker)
+    start_ms = int((time.perf_counter() - started) * 1000)
+    deadline = time.time() + 1.5
+    latest = job
+    while time.time() < deadline:
+        latest = store.get(job["generationJobId"]) or latest
+        if latest.get("status") == "ready":
+            break
+        time.sleep(0.02)
+    return {
+        "startMs": start_ms,
+        "finalStatus": latest.get("status"),
+        "articleReturned": bool((latest.get("article") or {}).get("markdown")),
+    }
+
 def prompt_proxy() -> dict:
     raw = (
         "国家数据局发布政策，提出加强关键数据技术攻关。"
@@ -205,7 +229,7 @@ def prompt_proxy() -> dict:
             tone="理性、清晰", length_spec={"min": 1800, "max": 2400, "target": 2100},
         )
     system_chars = len(captured.get("system", "")); user_chars = len(captured.get("user", ""))
-    return {"systemChars": system_chars, "userChars": user_chars, "totalPromptChars": system_chars + user_chars}
+    return {"systemChars": system_chars, "userChars": user_chars, "totalPromptChars": system_chars + user_chars, "containsVisualPlan": "visualPlan" in captured.get("user", ""), "containsVisualType": "visualType" in captured.get("user", "")}
 
 
 def main() -> None:
@@ -215,6 +239,7 @@ def main() -> None:
         "serperFallback": serper_budget(),
         "images": image_budget(),
         "hybridVisuals": hybrid_visual_routing_budget(),
+        "generationCoordination": generation_coordination(),
         "draftPromptProxy": prompt_proxy(),
     }
     checks = [
@@ -229,6 +254,11 @@ def main() -> None:
         report["hybridVisuals"]["allDiagramProvider"] == "generated-diagram",
         report["hybridVisuals"]["realFirstSerperCalls"] <= 2,
         report["hybridVisuals"]["realFirstFallbackProvider"] == "generated-diagram",
+        report["generationCoordination"]["startMs"] < 80,
+        report["generationCoordination"]["finalStatus"] == "ready",
+        report["generationCoordination"]["articleReturned"],
+        not report["draftPromptProxy"]["containsVisualPlan"],
+        not report["draftPromptProxy"]["containsVisualType"],
         report["draftPromptProxy"]["totalPromptChars"] < 16000,
     ]
     report["passed"] = all(checks)

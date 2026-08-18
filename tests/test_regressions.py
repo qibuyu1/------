@@ -1228,4 +1228,90 @@ class V30HybridCodeVisualTests(unittest.TestCase):
     def test_server_health_advertises_local_code_visuals(self):
         text = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn('"codeVisualsAvailable": True', text)
-        self.assertIn('"version": "30.0"', text)
+        self.assertIn('"version": "31.0"', text)
+
+
+class V31GenerationCoordinationTests(unittest.TestCase):
+    def test_generation_job_returns_immediately_and_finishes_in_background(self):
+        import time
+        from app.generation_jobs import GenerationJobStore
+
+        store = GenerationJobStore(max_items=4, ttl_seconds=60, workers=1)
+
+        def slow_worker(payload):
+            time.sleep(0.18)
+            return {"recommendedTitle": payload.get("query"), "markdown": "正文", "articleId": "demo"}
+
+        started = time.perf_counter()
+        job = store.start({"query": "测试"}, slow_worker)
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.08)
+        self.assertIn(job["status"], {"pending", "running"})
+        deadline = time.time() + 2
+        latest = job
+        while time.time() < deadline:
+            latest = store.get(job["generationJobId"])
+            if latest and latest.get("status") == "ready":
+                break
+            time.sleep(0.03)
+        self.assertEqual(latest["status"], "ready")
+        self.assertEqual(latest["article"]["markdown"], "正文")
+
+    def test_article_prompt_no_longer_asks_llm_to_design_visual_dsl(self):
+        text = (ROOT / "app" / "pipeline.py").read_text(encoding="utf-8")
+        llm_section = text[text.index("def _llm_article"):text.index("def _llm_polish_article")]
+        self.assertNotIn('"visualPlan"', llm_section)
+        self.assertNotIn('"visualType"', llm_section)
+        self.assertIn("源新闻回图、网络找图和代码绘图全部由文章完成后的本地视觉路由处理", llm_section)
+
+    def test_visual_worker_is_delayed_so_article_delivery_wins_cpu_race(self):
+        text = (ROOT / "app" / "pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("threading.Timer(0.8", text)
+        self.assertIn("_VISUAL_POOL.submit(job)", text)
+
+    def test_compose_uses_async_generation_polling_instead_of_long_request(self):
+        js = (ROOT / "web" / "compose.js").read_text(encoding="utf-8")
+        server = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn("waitForGenerationJob", js)
+        self.assertIn("/api/generation/", js)
+        self.assertIn("generation_jobs.start(payload, generate_article)", server)
+        self.assertIn("status=202", server)
+
+class V31VisualDecouplingTests(unittest.TestCase):
+    def test_visual_settings_are_not_part_of_writing_spec(self):
+        text = (ROOT / "app" / "pipeline.py").read_text(encoding="utf-8")
+        block = text[text.index("writing_spec = {"):text.index("calls: list[dict[str, Any]]", text.index("writing_spec = {"))]
+        self.assertNotIn('"imageStrategy"', block.split("visual_spec = {")[0])
+        self.assertIn('visual_spec = {', block)
+        self.assertIn('"imageStrategy": image_strategy', block)
+
+    def test_citation_marker_locally_binds_source_without_llm_visual_source_id(self):
+        from app import pipeline
+        article = {
+            "recommendedTitle": "数据产权登记开始进入实际操作",
+            "titleCandidates": ["数据产权登记开始进入实际操作"],
+            "markdown": "## 登记开始落地\n\n国家数据局发布相关工作指引，登记凭证可以进入流通和融资场景。[2]",
+            "imageQueries": [], "imageSlots": [],
+            "sourceNotes": [],
+            "sourceList": [
+                {"n": 1, "title": "无关来源", "source": "媒体A", "url": "https://example.cn/a", "snippet": "其他内容", "origin": "search"},
+                {"n": 2, "title": "数据产权登记工作指引", "source": "国家数据局", "url": "https://example.cn/policy/2", "snippet": "登记凭证可用于数据流通交易和融资担保", "origin": "search"},
+            ],
+        }
+        captured = {}
+        def fake_resolve(slots, query, **kwargs):
+            captured["slots"] = slots
+            return [{**slot, "image": None, "matchedBy": "test"} for slot in slots], []
+        with patch.object(pipeline, "resolve_visuals", side_effect=fake_resolve):
+            pipeline._apply_visual_layout(article, "数据产权登记", image_count=1, image_preference="混合")
+        body = next(x for x in captured["slots"] if x.get("kind") == "body")
+        self.assertEqual(body.get("sourceHint"), "数据产权登记工作指引")
+        self.assertEqual(body.get("sourceName"), "国家数据局")
+        self.assertTrue(body.get("sourceExplicit"))
+
+class V31DeploymentCompatibilityTests(unittest.TestCase):
+    def test_compose_assets_are_cache_busted_for_async_api_contract(self):
+        html = (ROOT / "web" / "compose.html").read_text(encoding="utf-8")
+        self.assertIn('/compose.js?v=31', html)
+        self.assertIn('/common.js?v=31', html)
+        self.assertIn('/styles.css?v=31', html)

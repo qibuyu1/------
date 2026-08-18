@@ -321,7 +321,7 @@ textarea,input,select{outline:none}
 
 @media(max-width:720px){.visual-audit-content{grid-template-columns:1fr}.visual-audit-thumb{width:100%;height:auto;max-height:220px}}
 
-/* V30: smart image routing / code visual strategy help */
+/* V31: smart image routing / code visual strategy help */
 .select-help{display:block;margin-top:6px;color:var(--muted);font-size:8px;line-height:1.5;font-weight:400}
 .form-grid label:has(select:disabled){opacity:.58}
 .form-grid select:disabled{cursor:not-allowed;background:#f3f6fa;color:#8190a3}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
 from datetime import date, datetime, timedelta
@@ -852,6 +853,10 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     if sources and tavily.available():
         sources, evidence_hydrated = _hydrate_sources_for_writing(query, sources)
 
+    # Keep writing and visual concerns separate.  The writing specification is
+    # reused by editorial/length-repair prompts, so image-routing settings must
+    # not leak into those LLM calls.  Visuals are planned only after the article
+    # exists and are stored under a separate visualSpec for audit/export UI.
     writing_spec = {
         "style": style,
         "audience": audience,
@@ -873,6 +878,8 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
         "factCheck": factual,
         "autoEvidence": auto_evidence,
         "smartSections": smart_sections,
+    }
+    visual_spec = {
         "coverImage": True,
         "bodyImageCount": image_count,
         "imageStrategy": image_strategy,
@@ -885,7 +892,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     article, meta = _llm_article(
         query, sources, style, audience, length, factual, citations and bool(sources),
         angle=angle, tone=tone, title_mode=title_mode, structure=structure,
-        closing_mode=closing_mode, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy,
+        closing_mode=closing_mode, image_count=image_count, image_preference=image_preference,
         opener=opener, paragraph_rhythm=paragraph_rhythm, evidence_style=evidence_style,
         ai_cliche_guard=ai_cliche_guard, length_spec=length_spec, smart_sections=smart_sections,
         brief_plan=brief_plan,
@@ -900,7 +907,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     article["recommendedTitle"] = (article.get("titleCandidates") or [str(article.get("recommendedTitle") or query)])[0]
     article["titleCandidates"] = _rank_wechat_titles([article["recommendedTitle"], *(article.get("titleCandidates") or [])], query)
 
-    if quality_mode == "deep" or _needs_editorial_repair(article, length_spec=length_spec, smart_sections=smart_sections, ai_cliche_guard=ai_cliche_guard, structure=structure):
+    if quality_mode == "deep" or _needs_editorial_repair(article, length_spec=length_spec, smart_sections=smart_sections, ai_cliche_guard=ai_cliche_guard, structure=structure, require_brief=bool(angle)):
         article, meta = _llm_polish_article(
             article, query, sources, style=style, audience=audience, tone=tone,
             paragraph_rhythm=paragraph_rhythm, evidence_style=evidence_style,
@@ -957,6 +964,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     article["generationMeta"] = _generation_meta(
         calls,
         writing_spec=writing_spec,
+        visual_spec=visual_spec,
         actual_chars=actual_chars,
         within_target=within_target,
         source_count=len(sources),
@@ -995,10 +1003,16 @@ def _start_visual_job(article_id: str, *, query: str, image_count: int, image_pr
             current.setdefault("warnings", []).append(f"自动配图失败：{str(exc)[:180]}")
             current["visualReport"] = {**(current.get("visualReport") or {}), "provider": "error"}
             article_store.update(article_id, current, save_history=False)
-    _VISUAL_POOL.submit(job)
+    # Give the article response / generation-job result a short head start before
+    # CPU-heavy PNG rendering and network image probing begin.  Starting the
+    # visual worker immediately could contend with JSON serialization on small
+    # deployments and made the newly added image system appear to break writing.
+    timer = threading.Timer(0.8, lambda: _VISUAL_POOL.submit(job))
+    timer.daemon = True
+    timer.start()
 
 
-def _needs_editorial_repair(article: dict[str, Any], *, length_spec: dict[str, int], smart_sections: bool, ai_cliche_guard: bool, structure: str = "") -> bool:
+def _needs_editorial_repair(article: dict[str, Any], *, length_spec: dict[str, int], smart_sections: bool, ai_cliche_guard: bool, structure: str = "", require_brief: bool = False) -> bool:
     """Cheap local quality gate. Only spend a second DeepSeek call when the draft is visibly deficient."""
     md = str(article.get("markdown") or "")
     if not md.strip():
@@ -1006,7 +1020,7 @@ def _needs_editorial_repair(article: dict[str, Any], *, length_spec: dict[str, i
     count = _article_char_count(md)
     if count < int(length_spec["min"] * 0.88) or count > int(length_spec["max"] * 1.10):
         return True
-    if article.get("understoodBrief") is None:
+    if require_brief and article.get("understoodBrief") is None:
         return True
     contamination = ["titleCandidates", "recommendedTitle", "editorialNotes", "sourceNotes", "imageSlots", "generationMeta", "json {", "```json", "用户写作规格", "写作切口", "promptTokens", "completionTokens", "reasoningTokens"]
     if any(token.lower() in md[:700].lower() for token in contamination):
@@ -1344,6 +1358,14 @@ def _apply_visual_layout(
             requested_source_id = int(slot.get("sourceId") or 0)
         except (TypeError, ValueError):
             requested_source_id = 0
+        # Writing and visual planning are intentionally decoupled in V31.  When
+        # the visible paragraph already carries a citation marker, that is a
+        # stronger provenance signal than asking the LLM to emit a separate
+        # image-slot sourceId.  Bind it locally before semantic fallback.
+        if requested_source_id <= 0:
+            cited = [int(x) for x in re.findall(r"\[(\d+)\]", str(slot.get("anchorText") or "")) if int(x) in source_by_n]
+            if cited:
+                requested_source_id = cited[0]
         exact_row = source_by_n.get(requested_source_id)
         if exact_row:
             bind_source(slot, exact_row, explicit=True)
@@ -1606,7 +1628,7 @@ def _pop_meta(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _generation_meta(
-    calls: list[dict[str, Any]], *, writing_spec: dict[str, Any], actual_chars: int,
+    calls: list[dict[str, Any]], *, writing_spec: dict[str, Any], visual_spec: dict[str, Any] | None = None, actual_chars: int,
     within_target: bool, source_count: int, auto_evidence_added: int,
 ) -> dict[str, Any]:
     prompt_tokens = sum(int(x.get("promptTokens") or 0) for x in calls)
@@ -1624,6 +1646,7 @@ def _generation_meta(
         "reasoningTokens": reasoning_tokens,
         "totalTokens": total_tokens,
         "writingSpec": writing_spec,
+        "visualSpec": dict(visual_spec or {}),
         "actualChars": actual_chars,
         "withinTarget": within_target,
         "sourceCount": source_count,
@@ -1707,7 +1730,7 @@ def _llm_article(
     query: str, sources: list[dict[str, Any]], style: str, audience: str, length: str,
     factual: bool, citations: bool, *, angle: str = "", tone: str = "理性、清晰",
     title_mode: str = "默认 · 自然起题", structure: str = "默认 · 按内容自然组织",
-    closing_mode: str = "默认 · 自然收束", image_count: int = 3, image_preference: str = "混合", image_strategy: str = "smart",
+    closing_mode: str = "默认 · 自然收束", image_count: int = 3, image_preference: str = "混合",
     opener: str = "默认 · 选择最自然切口", paragraph_rhythm: str = "默认 · 随内容调整",
     evidence_style: str = "默认 · 自然融入证据", ai_cliche_guard: bool = True,
     length_spec: dict[str, int] | None = None, reasoning_effort: str = "low", smart_sections: bool = True,
@@ -1771,7 +1794,6 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
 事实核验：{'开启' if factual else '常规'}
 保留来源编号：{'是' if citations else '否（不要生成引用编号）'}
 最终正文末尾不要自行添加“参考文献 / 参考来源 / 资料来源”章节；来源清单由系统内部管理，只有用户显式开启来源编号时正文内才出现 [1][2]。
-正文配图数量目标：{image_count} 张（不含封面）；封面图：1张；配图偏好：{image_preference}；配图策略：{image_strategy}
 智能小节：{"开启" if smart_sections else "关闭"}；开启也不等于必须分点。允许 0—4 个 ## 小标题，只有当一次明显的论证转折确实值得给读者路标时才使用；小标题必须写本节的具体内容，不得使用“问题/做法/机制/影响/条件/判断”这类抽象栏目名加冒号，不得为配图或凑结构额外造标题。
 
 来源资料：
@@ -1784,9 +1806,6 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
   "recommendedTitle": "从标题候选中选出最适合微信公众号发布的一条",
   "deck": "80字以内导语",
   "markdown": "完整正文；默认以自然文章为准。智能小节开启时仍允许 0—4 个 ## 二级标题，只有确实帮助阅读时才用；禁止固定六段式和抽象栏目式小标题。",
-  "coverBrief": "封面视觉语义描述",
-  "imageQueries": ["封面检索词", "正文检索词1"],
-  "imageSlots": [{{"afterHeading":"正文某个 ## 标题","purpose":"图片解释作用","query":"真实图搜索词","sourceId":2,"visualIntent":"auto|real|diagram","visualType":"flow|causal|compare|layered|network|timeline|kpi|matrix|concept","visualPlan":{{"title":"图中自然标题","nodes":["节点1","节点2"]}}}}],
   "socialSummary": "120字以内简介",
   "keyClaims": [{{"claim":"核心事实或判断","sourceIds":[1],"confidence":"high|medium|low"}}],
   "riskNotes": ["需要复核的点"],
@@ -1798,9 +1817,7 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
 2. {style} 与 {tone} 是否从开头到结尾一致，而不是只在第一段体现。
 3. 小标题数量是否真的有必要；若去掉小标题文章更顺，就减少或取消。凡保留的小标题都要具体、有信息量，且下面必须有完整论证。
 4. 没有来源时绝不编造具体事实；有来源时具体事实尽量紧跟编号。
-5. 配图检索词必须是“可被图片搜索引擎检索到的具体实体/场景/项目/机构活动”，禁止“蓝色科技背景”之类泛词。
-6. 具体案例/新闻/政策活动优先 visualIntent=real 并填写 sourceId；流程、因果、对比、分层、时间线、主体关系、数理/指标分析优先 visualIntent=diagram，并选择合适 visualType。普通段落用 auto。visualPlan 只给 3—6 个短节点/时间/对比项，必须来自正文或来源事实，禁止编造数字。
-7. visualPlan 只是绘图策划，不要为了画图改变正文结构，也不要额外制造小标题。"""
+5. 不要为了配图改变正文结构或制造小标题。封面、配图位置、源新闻回图、网络找图和代码绘图全部由文章完成后的本地视觉路由处理；本次写作只需要把正文和来源关系写清楚。"""
     max_tokens = max(3600, int(length_spec["target"] * 1.38) + 420)
     result = deepseek.generate_json(system_prompt, user_prompt, max_tokens=max_tokens, temperature=0.58, reasoning_effort=reasoning_effort)
     meta = _pop_meta(result)
@@ -1839,7 +1856,7 @@ def _llm_polish_article(
 可核对来源：
 {json.dumps(source_digest, ensure_ascii=False)}
 
-重点检查：删除空话和重复，但用更具体的解释、机制、对比、证据和边界替代；保持所选风格和语气；事实与判断分开；不增加来源外事实；保持 imageSlots 与最终正文一致。尤其检查“AI 提纲味”：若出现“问题/做法/机制/影响/条件/判断”等整齐栏目，合并章节、改成具体内容标题，或直接去掉小标题。智能小节开启时也只保留真正必要的 0—4 个，不为凑数量硬拆。
+重点检查：删除空话和重复，但用更具体的解释、机制、对比、证据和边界替代；保持所选风格和语气；事实与判断分开；不增加来源外事实；尤其检查“AI 提纲味”：若出现“问题/做法/机制/影响/条件/判断”等整齐栏目，合并章节、改成具体内容标题，或直接去掉小标题。智能小节开启时也只保留真正必要的 0—4 个，不为凑数量硬拆。
 返回与首稿同结构的完整 JSON，并增加 "editorialNotes"。"""
     result = deepseek.generate_json(
         "你是中文科技与产业内容的终审主编。严格执行用户的风格、语气、结构和字数要求，只返回 JSON。",

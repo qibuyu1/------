@@ -1,4 +1,4 @@
-# 数据要素治理 · V30 架构说明
+# 数据要素治理 · V31 架构说明
 
 ## 1. 交互式检索：短 Query、多路召回、国内优先
 
@@ -71,7 +71,7 @@ Serper 不是无条件混用，而是两处按需补充：
 
 `article/imageSlots -> routing decision -> source-page images | Serper | trusted local renderer -> visual gate -> embed`
 
-V30 不再把“所有图片都去网上搜”作为唯一方案。每个正文图片位会保留 `visualIntent / visualType / visualPlan`，但这些字段只描述**想解释什么**，不包含可执行代码。后端 `app/code_visuals.py` 是唯一像素执行器。
+V31 继续保留“源新闻图 / Serper 网络图 / 本地代码视觉”三路视觉能力，但把**写作主链和视觉主链彻底解耦**。DeepSeek 首稿不再负责输出 `visualIntent / visualType / visualPlan`；正文完成后，`plan_visual_slots()` 根据文章段落自动选位置，`_apply_visual_layout()` 再结合引用标记、来源标题/摘要与本地 `visual_fit_score` 判断应该找真实图还是代码绘图。后端 `app/code_visuals.py` 仍是唯一像素执行器，不执行模型生成的 Python。
 
 ### 8.1 智能默认
 
@@ -96,7 +96,7 @@ Renderer 自动发现 Linux / Windows / macOS 常见 CJK 字体，也允许用 `
 
 ### 8.4 成本守恒
 
-视觉规划跟随现有 DeepSeek 文章 JSON 返回，不新增一次 LLM 调用。代码绘图只使用本地 CPU。离线基准保持：Tavily 主链 5、Serper 搜索兜底最多 3、无来源正文图初始图片搜索最多 1、有来源页图片初始图片搜索 0；结构图/全部代码绘图可直接把 Serper Images 降为 0。
+视觉规划完全在文章生成后本地完成，不占用 DeepSeek 输出字段，也不新增 LLM 调用。代码绘图只使用本地 CPU。离线基准保持：Tavily 主链 5、Serper 搜索兜底最多 3、无来源正文图初始图片搜索最多 1、有来源页图片初始图片搜索 0；结构图/全部代码绘图可直接把 Serper Images 降为 0。
 
 是否具备真实网络图片的转载权仍需发布者依据来源授权和平台规则判断；系统负责检索、来源标注和技术嵌入。代码图会明确标为“系统根据本文内容绘制”。
 
@@ -248,3 +248,20 @@ PDF 主路径不再维护一套与 Word 分离的视觉参数；DOCX 和 PDF 共
 ## V30 智能混合视觉补充
 
 V29 的精度门禁是 V30 的真实图片底座，不被代码绘图绕过。代码图只在路由层被选择或真实候选失败后产生，因此不会为了提高“图片数量”而重新放宽二维码、泛科技图或段落语义规则。前端 `visualReport` 同时展示 `realPlaced / generatedDiagram / strategy`，便于自查本篇到底用了多少真实图与多少代码图。
+
+
+## V31 生成协调与超时隔离
+
+主链改为两级异步：
+
+`POST /api/generate -> generation job id (202) -> DeepSeek/证据处理后台线程 -> GET /api/generation/<id> -> article`
+
+文章一旦完成就进入 `article_store`，随后才启动视觉任务：
+
+`article ready -> 0.8s head start -> plan_visual_slots -> source binding -> source image / Serper / code visual -> article_store update`
+
+这样反向代理不再需要维持一条可能超过 100 秒的 `/api/generate` 长连接；视觉渲染也不会在正文首次响应前争抢 CPU。生成任务状态是短轮询 JSON，文章配图状态仍复用原有 `/api/article/<id>` 轮询。
+
+写作参数和视觉参数分别记录为 `generationMeta.writingSpec` 与 `generationMeta.visualSpec`。长度修复、编辑修复只接触写作规格，避免视觉策略进入 LLM Prompt。
+
+来源图片绑定不再依赖模型额外生成视觉 DSL：如果正文锚点带 `[2]`，会直接绑定 source #2；没有引用编号时再用标题、摘要、`sourceNotes` 的语义重叠进行本地匹配。

@@ -115,7 +115,17 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
         compact = re.sub(r"\s+", "", text)
         if len(compact) < 24:
             continue
-        sentences = [x.strip() for x in re.split(r"(?<=[。！？；])", text) if x.strip()]
+        sentence_parts = [x.strip() for x in re.split(r"(?<=[。！？；])", text) if x.strip()]
+        # Keep trailing citation markers with the sentence they support.  Without
+        # this merge, a paragraph ending in "。[2]" was split into a sentence and
+        # a tiny standalone "[2]" fragment, so the visual router lost the strongest
+        # local signal for returning to source #2's original image.
+        sentences: list[str] = []
+        for part in sentence_parts:
+            if sentences and re.fullmatch(r"(?:\[\d+\]\s*)+", part):
+                sentences[-1] = f"{sentences[-1]}{part}"
+            else:
+                sentences.append(part)
         units = [x for x in sentences if len(re.sub(r"\s+", "", x)) >= 18] or [text]
         for unit in units:
             candidates.append({"heading": current_heading, "anchorText": unit[:140], "blockIndex": str(block_index)})

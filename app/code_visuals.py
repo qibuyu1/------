@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-"""Trusted local editorial renderer for V30.
+"""Trusted local editorial renderer for V31.
 
-The LLM may describe *what* a visual should explain through a tiny JSON plan, but
-this module owns every pixel.  It never executes model-authored Python and never
-calls an image-generation API.  The output is a deterministic 1600x900 PNG data
-URI that can travel through the existing preview/DOCX/PDF image pipeline.
+The article is already complete before this module runs.  A local router may attach
+a small visual plan derived from the paragraph/source context, but the writing LLM
+is not required to design images.  This module owns every pixel, never executes
+model-authored Python, and never calls an image-generation API.  The output is a
+deterministic 1600x900 PNG data URI that can travel through the existing
+preview/DOCX/PDF image pipeline.
 """
 
 import base64
