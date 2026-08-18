@@ -21,6 +21,8 @@ from app.image_fetch import ImageFetchError, fetch_image
 from app.home_feed import home_feed
 from app.pipeline import generate_article, research, restore_original, revise_article, undo_revision
 from app.generation_jobs import generation_jobs
+from app.history_store import history_store
+from app.code_visuals import code_visuals_available
 from app.tavily import available as tavily_available
 
 ROOT = Path(__file__).resolve().parent
@@ -28,7 +30,7 @@ WEB_ROOT = ROOT / "web"
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DataElementGovernance/31.0"
+    server_version = "DataElementGovernance/33.0"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
@@ -39,18 +41,20 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "service": "数据要素治理",
-                    "version": "31.0",
+                    "version": "33.0",
                     "tavilyConfigured": tavily_available(),
                     "deepseekConfigured": deepseek_available(),
                     "deepseekModel": settings.deepseek_model if deepseek_available() else None,
                     "serperImagesConfigured": serper_images_available(),
-                    "codeVisualsAvailable": True,
+                    "codeVisualsAvailable": code_visuals_available(),
                     "serperSearchFallbackConfigured": bool(settings.serper_api_key),
                     "imageSearchProvider": "serper" if serper_images_available() else None,
                     "strictSources": True,
                     "exports": ["docx", "pdf"],
                     "uploads": ["txt", "md", "csv", "json", "html", "docx", "pdf"],
                     "revision": True,
+                    "history": True,
+                    "homeFeedCacheDays": 7,
                 }
             )
             return
@@ -60,12 +64,39 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/image":
             self._proxy_image(parsed.query)
             return
+        if path == "/api/history":
+            params = parse_qs(parsed.query)
+            try:
+                limit = int((params.get("limit") or ["40"])[0])
+            except ValueError:
+                limit = 40
+            self._json({"items": history_store.list(limit=max(1, min(80, limit)))})
+            return
+        if path.startswith("/api/history/"):
+            history_id = path.rsplit("/", 1)[-1].strip()
+            article = history_store.get(history_id)
+            if not article:
+                self._json({"error": "历史稿件不存在或已过期。"}, status=404)
+            else:
+                self._json(article)
+            return
         if path.startswith("/api/generation/"):
             job_id = path.rsplit("/", 1)[-1].strip()
             job = generation_jobs.get(job_id)
             if not job:
-                self._json({"error": "生成任务已过期，请重新生成。"}, status=410)
+                self._json({"error": "任务已过期，请重新执行。"}, status=410)
             else:
+                # The task result is a delivery snapshot. Visual enrichment may
+                # already have advanced the canonical article after the LLM worker
+                # returned, so expose the latest stored version whenever possible.
+                article_id = str(job.get("articleId") or ((job.get("article") or {}).get("articleId") if isinstance(job.get("article"), dict) else "") or "")
+                if job.get("status") == "ready" and article_id:
+                    record = article_store.get(article_id)
+                    if record:
+                        article = record.get("article") or {}
+                        article["articleId"] = article_id
+                        article["historyDepth"] = article_store.history_depth(article_id)
+                        job["article"] = article
                 self._json(job)
             return
         if path.startswith("/api/article/"):
@@ -115,14 +146,17 @@ class Handler(BaseHTTPRequestHandler):
                 # generation. DeepSeek/source hydration can legitimately exceed a
                 # reverse proxy's ~100s timeout, which previously surfaced as 524
                 # even though the worker was still healthy.
-                self._json(generation_jobs.start(payload, generate_article), status=202)
+                self._json(generation_jobs.start(payload, generate_article, kind="generate"), status=202)
                 return
             if path == "/api/generation/cancel":
                 job_id = str(payload.get("generationJobId") or "").strip()
                 self._json({"ok": generation_jobs.cancel(job_id), "generationJobId": job_id})
                 return
             if path == "/api/revise":
-                self._json(revise_article(payload))
+                # Revision can take as long as first-draft generation. Keep it on
+                # the same async queue so reverse proxies cannot turn a healthy
+                # DeepSeek rewrite into another 524.
+                self._json(generation_jobs.start(payload, revise_article, kind="revise"), status=202)
                 return
             if path == "/api/article/undo":
                 self._json(undo_revision(str(payload.get("articleId") or "")))
@@ -192,13 +226,19 @@ class Handler(BaseHTTPRequestHandler):
         title_override = str(payload.get("title") or "").strip()[:140]
         if title_override:
             current = list((record.get("article") or {}).get("titleCandidates") or [])
+            record["article"]["recommendedTitle"] = title_override
             record["article"]["titleCandidates"] = [title_override, *[x for x in current if x != title_override]]
         body, filename, content_type = export_article(record, fmt)
-        expect_images = bool((record.get("article") or {}).get("images") or (record.get("article") or {}).get("coverImage"))
-        # Missing external images must never block a valid document export or cause
-        # fake placeholders. The exporter skips unavailable images; structure checks
-        # remain strict, while media presence is reported rather than making download impossible.
-        validate_export_bytes(body, fmt, expect_images=False)
+        article = record.get("article") or {}
+        local_visuals = [
+            v for v in (article.get("visuals") or [])
+            if str((v.get("image") or {}).get("provider") or "") in {"generated-cover", "generated-diagram"}
+            and (v.get("image") or {}).get("url")
+        ]
+        # External news images can disappear or block hotlinking, so they remain
+        # best-effort. Locally rendered cover/diagram assets are deterministic and
+        # must survive DOCX/PDF export; validate media presence when those exist.
+        validate_export_bytes(body, fmt, expect_images=bool(local_visuals))
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -284,13 +324,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((settings.host, settings.port), Handler)
-    print("\n数据要素治理 V31.0")
+    print("\n数据要素治理 V33.0")
     print(f"  http://{settings.host}:{settings.port}")
     print(f"  Tavily: {'configured' if tavily_available() else 'NOT CONFIGURED'}")
     print(f"  DeepSeek: {settings.deepseek_model if deepseek_available() else 'NOT CONFIGURED (generation disabled)'}")
     print(f"  Image System: local code visuals + {'Serper / Google Images' if serper_images_available() else 'no Serper'}")
     print("  Upload: TXT / MD / CSV / JSON / HTML / DOCX / PDF")
-    print("  Export: Word / PDF · revision history enabled")
+    print("  Export: Word / PDF · revision + persistent article history enabled")
     print("  Search: Tavily primary · compact multi-query · semantic family match · optional Serper fallback")
     try:
         server.serve_forever()

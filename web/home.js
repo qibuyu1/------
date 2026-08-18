@@ -1,5 +1,6 @@
 (() => {
   const state = { items: [], position: 1, logical: 0, timer: null, duration: 6200, paused: false, demo: false };
+  const HOME_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
   const $ = (selector) => document.querySelector(selector);
   function sourceLink(item) {
     const link = GovernanceApp.safeUrl(item.url);
@@ -80,16 +81,23 @@
 
   function readCachedFeed() {
     try {
-      const cached = JSON.parse(localStorage.getItem("deg.homeFeed.v20") || "null");
+      const cached = JSON.parse(localStorage.getItem("deg.homeFeed.v33") || "null");
       if (!cached || !Array.isArray(cached.items) || !cached.items.length) return null;
-      if (Date.now() - Number(cached.savedAt || 0) > 6 * 60 * 60 * 1000) return null;
+      if (Date.now() - Number(cached.savedAt || 0) > HOME_CACHE_TTL) return null;
       return cached.items.filter((item) => item && (item.sourceVerified || item.sourceUsable)).slice(0, 10);
     } catch { return null; }
   }
 
   async function loadFeed() {
     const cached = readCachedFeed();
-    state.items = cached || []; state.demo = false; if (state.items.length) { render(); startAuto(); } else { renderEmpty(); }
+    state.items = cached || []; state.demo = false;
+    if (state.items.length) {
+      render(); startAuto();
+      // Homepage recommendations are deliberately weekly, not live. A fresh
+      // browser cache must not even call the server, so opening the homepage
+      // repeatedly consumes zero Tavily quota for seven days.
+      return;
+    } else { renderEmpty(); }
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 18000);
@@ -100,7 +108,7 @@
       const items = (data.items || []).slice(0, 10);
       if (!items.length) throw new Error("当前推荐正在更新");
       state.items = items; state.demo = Boolean(data.demo); render(); startAuto();
-      if (items.length && !data.demo) localStorage.setItem("deg.homeFeed.v20", JSON.stringify({ items, savedAt: Date.now() }));
+      if (items.length && !data.demo) localStorage.setItem("deg.homeFeed.v33", JSON.stringify({ items, savedAt: Date.now() }));
     } catch {
       // Keep cached/fallback content visible; a failed refresh should not blank the hero.
     }

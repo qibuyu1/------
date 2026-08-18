@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from .scoring import normalize_title
@@ -80,7 +81,7 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
         if block.get("type") == "heading":
             current_heading = str(block.get("text") or "")
         elif block.get("type") == "paragraph" and current_heading and current_heading not in first_paragraph_by_heading:
-            first_paragraph_by_heading[current_heading] = (str(block.get("text") or "")[:220], str(block_index))
+            first_paragraph_by_heading[current_heading] = (str(block.get("text") or "")[:700], str(block_index))
     for raw in raw_slots:
         if len([x for x in slots if x.get("kind")=="body"]) >= max_body or not isinstance(raw, dict):
             break
@@ -101,7 +102,7 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
             visual_intent = "auto"
         visual_type = str(raw.get("visualType") or "").strip().lower()
         visual_plan = raw.get("visualPlan") if isinstance(raw.get("visualPlan"), dict) else {}
-        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": matched, "anchorText": anchor_text, "anchorBlockIndex": anchor_index, "purpose": str(raw.get("purpose") or "解释本节核心信息")[:160], "query": slot_query or f"{query} {matched} {anchor_text[:70]}", "sourceId": source_id if source_id != "0" else "", "placement": "heading", "visualIntent": visual_intent, "visualType": visual_type, "visualPlan": visual_plan})
+        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": matched, "anchorText": anchor_text[:240], "contextText": anchor_text[:700], "anchorBlockIndex": anchor_index, "purpose": str(raw.get("purpose") or "解释本节核心信息")[:160], "query": slot_query or f"{query} {matched} {anchor_text[:70]}", "sourceId": source_id if source_id != "0" else "", "placement": "heading", "visualIntent": visual_intent, "visualType": visual_type, "visualPlan": visual_plan})
 
     candidates: list[dict[str, str]] = []
     current_heading = ""
@@ -122,13 +123,13 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
         # local signal for returning to source #2's original image.
         sentences: list[str] = []
         for part in sentence_parts:
-            if sentences and re.fullmatch(r"(?:\[\d+\]\s*)+", part):
+            if sentences and re.fullmatch(r"(?:\[(?:\d+(?:\s*[,，]\s*\d+)*)\]\s*)+", part):
                 sentences[-1] = f"{sentences[-1]}{part}"
             else:
                 sentences.append(part)
         units = [x for x in sentences if len(re.sub(r"\s+", "", x)) >= 18] or [text]
         for unit in units:
-            candidates.append({"heading": current_heading, "anchorText": unit[:140], "blockIndex": str(block_index)})
+            candidates.append({"heading": current_heading, "anchorText": unit[:220], "contextText": text[:700], "blockIndex": str(block_index)})
 
     need = max(0, max_body - len([x for x in slots if x.get("kind")=="body"]))
     for idx in _spread_indexes(len(candidates), need):
@@ -140,7 +141,7 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
         model_query = image_queries[query_cursor] if query_cursor < len(image_queries) else ""
         query_cursor += 1
         slot_query = " ".join(x for x in [query, c["heading"], c["anchorText"][:90], model_query] if x)[:220]
-        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": c["heading"], "anchorText": c["anchorText"], "anchorBlockIndex": c["blockIndex"], "purpose": "与该段核心信息直接相关的视觉解释", "query": slot_query, "placement": "paragraph", "visualIntent": "auto", "visualType": "", "visualPlan": {}})
+        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": c["heading"], "anchorText": c["anchorText"], "contextText": c.get("contextText", c["anchorText"]), "anchorBlockIndex": c["blockIndex"], "purpose": "与该段核心信息直接相关的视觉解释", "query": slot_query, "placement": "paragraph", "visualIntent": "auto", "visualType": "", "visualPlan": {}})
     return slots[:max_body+1]
 
 
@@ -150,47 +151,76 @@ def merge_visuals_into_blocks(markdown: str, visuals: list[dict[str, Any]]) -> l
     if not body_visuals:
         return blocks
     by_heading: dict[str, list[dict[str, Any]]] = {}
-    by_anchor: dict[str, list[dict[str, Any]]] = {}
     by_index: dict[int, list[dict[str, Any]]] = {}
+
+    heading_for_index: dict[int, str] = {}
+    current_heading = ""
+    for idx, block in enumerate(blocks):
+        if block.get("type") == "heading":
+            current_heading = normalize_title(str(block.get("text") or ""))
+        elif block.get("type") == "paragraph":
+            heading_for_index[idx] = current_heading
+
+    def anchor_score(anchor: str, text: str) -> float:
+        a = normalize_title(anchor)[:140]
+        b = normalize_title(text)[:220]
+        if not a or not b:
+            return 0.0
+        if a in b or b in a:
+            return 1.0
+        return SequenceMatcher(None, a, b, autojunk=False).ratio()
+
     for visual in body_visuals:
         h = normalize_title(str(visual.get("afterHeading") or ""))
-        a = normalize_title(str(visual.get("anchorText") or ""))
+        a = str(visual.get("anchorText") or "").strip()
         bi = visual.get("anchorBlockIndex")
-        # Model-authored slots deliberately mean“after this heading”; keep that
-        # editorial intent. Automatically spread fallback slots, however, should
-        # follow their concrete paragraph index so several images in one section
-        # do not stack directly under the same heading.
         if str(visual.get("placement") or "") == "heading" and h:
             by_heading.setdefault(h, []).append(visual)
             continue
+
+        chosen_index: int | None = None
         try:
-            if bi not in (None, ""):
-                by_index.setdefault(int(bi), []).append(visual)
-                continue
+            candidate_index = int(bi) if bi not in (None, "") else -1
         except (TypeError, ValueError):
-            pass
-        if a:
-            by_anchor.setdefault(a[:60], []).append(visual)
+            candidate_index = -1
+        if 0 <= candidate_index < len(blocks) and blocks[candidate_index].get("type") == "paragraph":
+            candidate_text = str(blocks[candidate_index].get("text") or "")
+            if not a or anchor_score(a, candidate_text) >= 0.38:
+                chosen_index = candidate_index
+
+        if chosen_index is None and a:
+            best_index = -1
+            best_score = 0.0
+            for idx, block in enumerate(blocks):
+                if block.get("type") != "paragraph":
+                    continue
+                score = anchor_score(a, str(block.get("text") or ""))
+                if h and heading_for_index.get(idx) == h:
+                    score += 0.12
+                if score > best_score:
+                    best_index, best_score = idx, score
+            if best_index >= 0 and best_score >= 0.36:
+                chosen_index = best_index
+
+        if chosen_index is not None:
+            by_index.setdefault(chosen_index, []).append(visual)
         elif h:
+            # Keeping images during a revision should not silently drop them if the
+            # paragraph was rewritten beyond textual recognition. Fall back to the
+            # section rather than attaching them to an unrelated old numeric index.
             by_heading.setdefault(h, []).append(visual)
+
     used: set[str] = set()
     merged: list[dict[str, Any]] = []
     for idx, block in enumerate(blocks):
         merged.append(block)
-        exact = by_index.get(idx, [])
-        for visual in exact:
+        for visual in by_index.get(idx, []):
             slot = str(visual.get("slotId") or "")
             if slot and slot not in used:
                 merged.append(_image_block(visual)); used.add(slot)
         if block.get("type") == "heading":
             key = normalize_title(str(block.get("text") or ""))
             for visual in by_heading.pop(key, []):
-                slot = str(visual.get("slotId") or "")
-                if slot and slot not in used:
-                    merged.append(_image_block(visual)); used.add(slot)
-        elif block.get("type") == "paragraph":
-            key = normalize_title(str(block.get("text") or "")[:120])
-            for visual in by_anchor.pop(key[:60], []):
                 slot = str(visual.get("slotId") or "")
                 if slot and slot not in used:
                     merged.append(_image_block(visual)); used.add(slot)

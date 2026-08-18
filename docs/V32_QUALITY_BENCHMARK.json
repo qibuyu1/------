@@ -1,0 +1,12 @@
+{
+  "version": "V32.0",
+  "tests": "138 passed",
+  "qualityBenchmarkPassed": true,
+  "searchMinMargin": 86,
+  "tavilyPrimaryCalls": 5,
+  "serperFallbackCalls": 3,
+  "noSourceInitialImageCalls": 1,
+  "sourcePageInitialImageCalls": 0,
+  "smartVisualProvider": "generated-diagram",
+  "draftPromptChars": 13005
+}

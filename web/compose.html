@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2563eb" />
   <title>自动生成推文 · 数据要素治理</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/styles.css?v=31" />
+  <link rel="stylesheet" href="/styles.css?v=33" />
 </head>
 <body>
   <header class="site-header">
@@ -19,7 +19,7 @@
   <main class="workspace-main compose-page">
     <div class="workspace-titlebar page-width wide-width">
       <div><a class="back-link" href="/index.html">← 首页</a><h1>自动生成公众号推文</h1><span>证据、写作、配图、修改和导出都在这里完成</span></div>
-      <a class="header-action" href="/search.html">先查询资料 →</a>
+      <div class="workspace-title-actions"><button class="header-action header-button" id="historyButton" type="button">历史记录</button><a class="header-action" href="/search.html">先查询资料 →</a></div>
     </div>
 
     <div class="compose-workspace page-width wide-width">
@@ -53,7 +53,7 @@
             <label><span>结尾方式</span><select id="closingMode"><option selected>默认 · 自然收束</option><option>观察清单</option><option>未来趋势</option><option>行动建议</option><option>开放问题</option><option>简短总结</option></select></label>
             <label><span>生成质量</span><select id="qualityMode"><option value="auto" selected>默认 · 自动平衡</option><option value="standard">快速高质量</option><option value="deep">深度精修 · 双阶段</option></select></label>
           </div>
-          <div class="toggle-stack"><label class="toggle-row"><span><strong>智能小节（按需）</strong><small>只在确实能帮助阅读时才加小标题；允许整篇连续叙述，也不会固定拆成“问题 / 做法 / 机制 / 影响 / 判断”之类提纲。</small></span><input id="smartSectionsToggle" type="checkbox" checked><i></i></label><label class="toggle-row"><span><strong>严格抑制 AI 套话</strong><small>减少模板句、空话和机械过渡</small></span><input id="clicheToggle" type="checkbox" checked><i></i></label></div>
+          <div class="toggle-stack"><label class="toggle-row"><span><strong>严格抑制 AI 套话</strong><small>公众号正文默认保留自然、有信息量的小标题；分点数量只服从文章论证和篇幅，与配图数量完全独立。</small></span><input id="clicheToggle" type="checkbox" checked><i></i></label></div>
         </div>
 
         <div class="settings-section">
@@ -75,7 +75,7 @@
       </section>
 
       <section class="article-side">
-        <div class="article-toolbar"><div class="preview-tabs"><button class="active" data-tab="preview">文章预览</button><button data-tab="insights">生成分析</button><button data-tab="visuals">配图与来源</button></div><div class="export-menu"><button id="reviseButton" disabled>再次修改</button><button id="copyButton" disabled>复制公众号 HTML</button></div></div>
+        <div class="article-toolbar"><div class="preview-tabs"><button class="active" data-tab="preview">文章预览</button><button data-tab="insights">生成分析</button><button data-tab="visuals">配图与来源</button></div><div class="export-menu"><button id="newArticleButton" type="button">生成其他推文</button><button id="reviseButton" disabled>再次修改</button><button id="copyButton" disabled>复制公众号 HTML</button></div></div>
 
         <div class="revision-panel" id="revisionPanel" hidden>
           <div class="revision-head"><div><strong>再次修改</strong><span id="revisionTargetLabel">默认修改整篇文章</span></div><button id="closeRevision" type="button">×</button></div>
@@ -105,7 +105,15 @@
     </div>
   </main>
 
-  <script src="/common.js?v=31" defer></script>
-  <script src="/compose.js?v=31" defer></script>
+  <div class="history-modal" id="historyModal" hidden>
+    <div class="history-backdrop" data-close-history></div>
+    <aside class="history-drawer" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+      <div class="history-head"><div><strong id="historyTitle">历史记录</strong><span>保留最近生成的稿件，点击即可查看；新推文不会覆盖旧稿。</span></div><button id="closeHistoryButton" type="button" aria-label="关闭历史记录">×</button></div>
+      <div class="history-list" id="historyList"><div class="history-empty">正在读取历史记录…</div></div>
+    </aside>
+  </div>
+
+  <script src="/common.js?v=33" defer></script>
+  <script src="/compose.js?v=33" defer></script>
 </body>
 </html>

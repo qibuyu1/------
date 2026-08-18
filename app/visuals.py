@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from . import serper_images
 from .image_fetch import ImageProfile, image_profile
-from .code_visuals import build_body_visual, build_cover_data_uri, visual_fit_score
+from .code_visuals import build_body_visual, build_cover_data_uri, visual_fit_score, code_visuals_available
 from .source_page_images import discover_source_images
 
 
@@ -158,9 +158,10 @@ def resolve_visuals(
     strategy = str(strategy or "smart").strip().lower()
     if strategy not in {"smart", "real_first", "diagram_first", "all_diagram", "real_only"}:
         strategy = "smart"
+    code_ready = code_visuals_available()
     direct_diagram_ids = {
         str(slot.get("slotId") or "") for slot in slots
-        if slot.get("kind") == "body" and _direct_diagram_decision(slot, query, strategy)
+        if code_ready and slot.get("kind") == "body" and _direct_diagram_decision(slot, query, strategy)
     }
     serper_ready = serper_images.available()
     has_origin_images = any(
@@ -180,16 +181,19 @@ def resolve_visuals(
         visuals: list[dict[str, Any]] = []
         for slot in slots:
             if slot.get("kind") == "cover":
-                visuals.append(_generated_cover_visual(slot, query))
-            elif strategy == "real_only":
-                visuals.append({**slot, "image": None, "matchedBy": "unresolved-real-only"})
+                visuals.append(_generated_cover_visual(slot, query) if code_ready else {**slot, "image": None, "matchedBy": "unresolved-no-cjk-font"})
+            elif strategy == "real_only" or not code_ready:
+                visuals.append({**slot, "image": None, "matchedBy": "unresolved-real-only" if strategy == "real_only" else "unresolved-no-cjk-font"})
             else:
                 visuals.append(_generated_body_visual(slot, query, reason="no-web-image-config"))
-        message = (
-            "未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图：按当前配图策略已改用代码绘图补齐正文。"
-            if strategy != "real_only" else
-            "未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图；当前选择仅真实图片，因此正文图片位保持为空。"
-        )
+        if not code_ready:
+            message = "当前运行环境缺少可用中文字体，本地代码绘图已自动停用以避免方块字；安装 Noto CJK 后会自动恢复，文章生成不受影响。"
+        else:
+            message = (
+                "未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图：按当前配图策略已改用代码绘图补齐正文。"
+                if strategy != "real_only" else
+                "未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图；当前选择仅真实图片，因此正文图片位保持为空。"
+            )
         return visuals, [message]
 
     results_by_slot: dict[str, list[dict[str, Any]]] = {slot["slotId"]: [] for slot in slots}
@@ -389,7 +393,11 @@ def resolve_visuals(
     unresolved: list[dict[str, Any]] = []
     for slot in slots:
         if slot.get("kind") == "cover":
-            resolved[slot["slotId"]] = _generated_cover_visual(slot, query)
+            if code_ready:
+                resolved[slot["slotId"]] = _generated_cover_visual(slot, query)
+            else:
+                resolved[slot["slotId"]] = {**slot, "image": None, "matchedBy": "unresolved-no-cjk-font"}
+                warnings.append("本地代码封面因缺少中文字体暂未生成，避免出现方块字；文章正文不受影响。")
             continue
         if str(slot.get("slotId") or "") in direct_diagram_ids:
             resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason=f"{strategy}-direct")
@@ -466,9 +474,13 @@ def resolve_visuals(
         if picked:
             commit(slot, picked, profile, fallback=True)
             continue
-        if strategy != "real_only":
+        if strategy != "real_only" and code_ready:
             resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason="search-fallback")
             warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到足够可靠的真实图片，已自动改为系统绘制示意图，避免拿无关图片凑数。")
+            continue
+        if strategy != "real_only" and not code_ready:
+            warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到可靠真实图片；当前环境缺少中文字体，代码绘图已停用以避免方块字，该位置留空。")
+            resolved[slot["slotId"]] = {**slot, "image": None, "matchedBy": "unresolved-no-cjk-font"}
             continue
         if serper_ready:
             warnings.append(f"“{slot.get('afterHeading') or '正文'}”没有找到通过来源原图/语义/可下载性检查的正文图片；当前选择仅真实图片，该位置留空。")

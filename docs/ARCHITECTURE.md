@@ -1,4 +1,4 @@
-# 数据要素治理 · V31 架构说明
+# 数据要素治理 · V33 架构说明
 
 ## 1. 交互式检索：短 Query、多路召回、国内优先
 
@@ -61,17 +61,17 @@ Serper 不是无条件混用，而是两处按需补充：
 
 ## 7. 写作与修订
 
-`evidence -> optional hydration -> DeepSeek draft -> editorial gate -> visual planning -> ArticleStore`
+`upload/manual/auto evidence -> priority pack -> async DeepSeek draft -> editorial gate -> ArticleStore -> independent visual planning`
 
-写作规格会把文章类型、目标读者、篇幅、语气、标题偏好、结构、开头、段落节奏、证据表达和结尾方式转换成明确规则。深度模式可执行二次主编精修；长度不达标时再做有限次数的长度修复。
+写作规格会把文章类型、目标读者、篇幅、语气、标题偏好、结构、开头、段落节奏、证据表达和结尾方式转换成明确规则。上传材料优先于手动来源，手动来源优先于自动网络资料。公众号稿必须保留自然小标题，标题数量按篇幅/论证复杂度决定，与图片数量无关。
 
-修改支持句子、段落、章节和整篇范围，并保留撤回与恢复初稿历史。
+DeepSeek 常规路径只做一次结构化生成；若出现空 JSON、无效 JSON 或输出截断，最多再做一次 Markdown salvage。首稿与改稿均通过后台任务执行；修改支持句子、段落、章节和整篇范围，并保留撤回、恢复初稿与持久化历史记录。
 
 ## 8. 图片：真实来源 + Serper + 本地代码视觉三路智能路由
 
 `article/imageSlots -> routing decision -> source-page images | Serper | trusted local renderer -> visual gate -> embed`
 
-V31 继续保留“源新闻图 / Serper 网络图 / 本地代码视觉”三路视觉能力，但把**写作主链和视觉主链彻底解耦**。DeepSeek 首稿不再负责输出 `visualIntent / visualType / visualPlan`；正文完成后，`plan_visual_slots()` 根据文章段落自动选位置，`_apply_visual_layout()` 再结合引用标记、来源标题/摘要与本地 `visual_fit_score` 判断应该找真实图还是代码绘图。后端 `app/code_visuals.py` 仍是唯一像素执行器，不执行模型生成的 Python。
+V33 保留“源新闻图 / Serper 网络图 / 本地代码视觉”三路视觉能力，并继续让写作主链与视觉主链解耦。DeepSeek 首稿不输出视觉字段；正文完成后，`plan_visual_slots()` 先独立选择图片位置，批量视觉规划器只读取这些位置的完整上下文并输出受限 DSL（type/nodes/edges 等），`_apply_visual_layout()` 再结合引用、来源标题/摘要与本地 `visual_fit_score` 路由真实图或代码图。后端 `app/code_visuals.py` 是唯一像素执行器，不执行模型生成 Python。
 
 ### 8.1 智能默认
 
@@ -90,13 +90,13 @@ V31 继续保留“源新闻图 / Serper 网络图 / 本地代码视觉”三路
 
 `visual DSL -> sanitize -> theme / composition / content extraction -> Pillow renderer -> PNG data URI`
 
-支持封面多视觉方向和正文 `flow / causal / compare / layered / network / timeline / kpi / matrix / concept`。色板根据治理、AI、安全、公共数据、数据资产、研发、产业等语义切换；内容节点尽量从 `visualPlan` 和相邻正文提取。KPI 没有真实数字时退回 concept，绝不为了版式填充虚构指标。
+支持封面多视觉方向和正文 `flow / causal / relation / compare / layered / network / timeline / kpi / matrix / concept`。视觉规划读取相邻完整段落上下文，关系图支持显式 `edges`，节点/箭头必须能回到正文中的真实对象和动作。色板根据治理、AI、安全、公共数据、数据资产、研发、产业等语义切换；KPI 没有真实数字时退回 concept，绝不为了版式填充虚构指标。
 
-Renderer 自动发现 Linux / Windows / macOS 常见 CJK 字体，也允许用 `DEG_VISUAL_FONT*` 环境变量覆盖；项目不打包字体。
+Renderer 自动发现 Linux / Windows / macOS 常见 CJK 字体，也允许用 `DEG_VISUAL_FONT*` 环境变量覆盖；项目不打包字体。Docker 默认安装 `fonts-noto-cjk`。若找不到真实 CJK 字体，`code_visuals_available()` 返回 false，视觉路由会禁用代码绘图而不是用 Pillow 默认字体输出中文方块。
 
 ### 8.4 成本守恒
 
-视觉规划完全在文章生成后本地完成，不占用 DeepSeek 输出字段，也不新增 LLM 调用。代码绘图只使用本地 CPU。离线基准保持：Tavily 主链 5、Serper 搜索兜底最多 3、无来源正文图初始图片搜索最多 1、有来源页图片初始图片搜索 0；结构图/全部代码绘图可直接把 Serper Images 降为 0。
+视觉规划不进入首稿 Prompt；只有文章完成后、确实存在需要解释图的槽位时，才允许一次批量非 thinking 规划调用，所有槽位在同一请求中完成。代码绘图本身只使用本地 CPU。离线基准保持：Tavily 主链 5、Serper 搜索兜底最多 3、无来源正文图初始图片搜索最多 1、有来源页图片初始图片搜索 0；结构图/全部代码绘图可直接把 Serper Images 降为 0。
 
 是否具备真实网络图片的转载权仍需发布者依据来源授权和平台规则判断；系统负责检索、来源标注和技术嵌入。代码图会明确标为“系统根据本文内容绘制”。
 
@@ -114,9 +114,9 @@ Renderer 自动发现 Linux / Windows / macOS 常见 CJK 字体，也允许用 `
 
 ## 10. 首页与缓存
 
-`browser local cache -> /api/home-feed -> server cache -> research`
+`browser localStorage (7d) -> /api/home-feed -> disk cache (7d) -> research refresh`
 
-浏览器优先绘制上次成功的真实 feed；首次没有 feed 时展示真实专题入口而不是演示新闻。服务端研究缓存按查询计划版本化，避免继续命中旧版错误 Query 的缓存快照。
+首页资讯采用两层 7 天缓存。浏览器有新鲜 feed 时直接渲染，不请求后端；浏览器没有缓存时请求 `/api/home-feed`，服务端优先读取 `data/home_feed_cache.json`。只有磁盘缓存也超过 7 天才重新执行 Tavily 研究。刷新失败时可回退到旧磁盘缓存，因此普通打开首页不会重复消耗 Tavily。
 
 ## 11. 真实性原则
 
@@ -125,19 +125,19 @@ Renderer 自动发现 Linux / Windows / macOS 常见 CJK 字体，也允许用 `
 
 ### 自动证据
 
-`compose topic + writing brief -> frontend research -> server fallback research -> balanced evidence -> sourceList -> UI evidence sync`
+`compose topic + writing brief -> backend research -> balanced evidence -> sourceList -> UI evidence sync`
 
-前端自动研究不是唯一入口。生成端看到 `autoEvidence=true` 且证据仍为空时，会再次使用主题与写作 brief 做相关性优先检索，并只在候选不足时放宽一次。最终采用来源反向同步到生成页，保证“自动补充”对用户可见。
+V33 取消生成前的前端阻塞式自动检索，避免同一篇文章前后各搜一次。生成端在 `autoEvidence=true` 且证据为空时统一使用主题与写作 brief 检索；首轮已有 3 条可用来源即停止，确实过薄才放宽一次。最终采用来源反向同步到生成页。
 
 ### 默认结构质量门禁
 
-默认结构没有固定章数。Prompt 优先 0—3 个自然小标题，本地门禁会识别“问题/做法/机制/影响/条件/判断”等模板化标题；默认结构出现四个以上整齐章节时，也会进入一次编辑修复。显式选择某个结构模板时，才按用户选项执行。
+V33 的公众号正文必须有自然小标题，但没有固定栏目模板。目标数量按篇幅动态确定（短篇约 3—4、中篇 4—6、长篇 5—7、更长 6—8），与图片数量无关。本地门禁识别“问题/做法/机制/影响/条件/判断”等栏目化标题以及句式高度同构的目录；是否修复取决于质量，不以“小标题超过四个”为触发条件。
 
 ### 图片
 
-`final title/section/adjacent paragraph -> strict semantic image query -> Serper -> metadata relevance gate -> download probe -> embed`
+`final title/section/adjacent paragraph -> source binding -> source image | Serper | code visual -> quality gate -> embed`
 
-封面不进入 Serper 链路，而由最终标题与 cover brief 生成固定编辑设计图。正文图片必须同时满足章节语义和图片元数据语义；数据类文章额外要求候选自身带有数据/模型/算法/AI 等上下文。语义不足时槽位留空。
+封面不占正文图片数量。正文图片首先看是否有明确案例/政策/新闻来源；没有可靠真实图时再按段落语义搜索。流程、因果、关系、对比、数理结构等内容可由受控代码视觉直接解释。所有真实图片仍经过二维码、Logo、尺寸、重复和段落语义门禁。
 
 ### 导出
 
@@ -265,3 +265,38 @@ V29 的精度门禁是 V30 的真实图片底座，不被代码绘图绕过。�
 写作参数和视觉参数分别记录为 `generationMeta.writingSpec` 与 `generationMeta.visualSpec`。长度修复、编辑修复只接触写作规格，避免视觉策略进入 LLM Prompt。
 
 来源图片绑定不再依赖模型额外生成视觉 DSL：如果正文锚点带 `[2]`，会直接绑定 source #2；没有引用编号时再用标题、摘要、`sourceNotes` 的语义重叠进行本地匹配。
+
+
+## V32 状态一致性与任务隔离
+
+- `GenerationJobStore` 同时承载首稿与改稿，运行中任务不参与 TTL/容量淘汰。
+- 文章增加 `contentVersion`；视觉后台任务用 `visualJobToken + contentVersion` 做提交前校验。
+- 视觉计算基于私有快照，完成后仅通过 `ArticleStore.update_runtime_fields()` 合并视觉字段，禁止用旧快照替换整篇文章。
+- 初稿视觉完成后同步到 original runtime 字段，确保“恢复初稿”恢复的是完整图文初稿而不是永久 pending 的骨架。
+- 前端持久化 pending job，可在刷新后恢复；502/503/504 轮询波动不会立即中止任务。
+- 写作配置和视觉配置继续分离，改稿必须继承 `generationMeta.visualSpec`。
+
+
+## V33 生成、证据、历史与首页缓存补充
+
+### 生成任务
+
+`POST /api/generate -> GenerationJobStore -> worker -> DeepSeek -> ArticleStore/HistoryStore -> GET /api/generation/<id>`
+
+前端每开始一篇新稿都会创建新的 `generationEpoch`。旧任务即使迟到，也会在 UI 提交阶段被丢弃；“生成其他推文”同时清理上一稿自动证据和任务状态。改稿使用同一任务机制。
+
+### 证据优先级
+
+`upload > manual selected > auto web`
+
+上传文件允许更大的正文摘录预算，并在 ArticleStore 中保留更多原文供再次修改使用。自动检索只补齐网络背景，不覆盖用户明确上传/选择的材料。自动证据首轮已有 3 条可用来源时停止，不再为了凑数强制第二轮扩搜。
+
+### 首页缓存
+
+`browser localStorage (7d) -> /api/home-feed -> disk cache (7d) -> Tavily refresh`
+
+服务器缓存位于 `data/home_feed_cache.json`（可通过 `DEG_HOME_FEED_CACHE` 覆盖）。七天内浏览器通常不会请求后端；即使换浏览器/服务重启，磁盘缓存仍能避免重复 Tavily 查询。
+
+### 历史记录
+
+`HistoryStore` 默认保存 30 天、最多 80 篇的轻量文章快照，不存储大体积 base64 图片。生成、改稿与视觉完成会更新对应历史项；前端“历史记录”可恢复可编辑稿。

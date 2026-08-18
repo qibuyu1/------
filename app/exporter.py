@@ -16,7 +16,7 @@ from .image_fetch import ImageFetchError, image_bytes_for_document
 
 
 BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
-SOURCE_REF_RE = re.compile(r"\[(\d+)\]")
+SOURCE_REF_RE = re.compile(r"\[(\d+(?:\s*[,，]\s*\d+)*)\]")
 
 
 def _show_references(article: dict[str, Any]) -> bool:
@@ -83,8 +83,20 @@ def validate_export_bytes(data: bytes, fmt: str, *, expect_images: bool = False)
             reader = PdfReader(io.BytesIO(data), strict=False)
             if not reader.pages:
                 raise ExportError("PDF 文件生成校验失败：没有可读取页面")
+            pdf_image_count = 0
             for page in reader.pages:
                 _ = page.mediabox.width, page.mediabox.height
+                try:
+                    resources = page.get("/Resources") or {}
+                    xobjects = resources.get("/XObject") or {}
+                    for ref in xobjects.values():
+                        obj = ref.get_object()
+                        if str(obj.get("/Subtype") or "") == "/Image":
+                            pdf_image_count += 1
+                except Exception:
+                    pass
+            if expect_images and pdf_image_count < 1:
+                raise ExportError("PDF 文件生成校验失败：预期本地配图未进入 PDF")
         except ExportError:
             raise
         except Exception as exc:
@@ -913,7 +925,7 @@ def _bottom_border(paragraph: Any, *, color: str, size: str) -> None:
 def _pdf_inline(text: str) -> str:
     normalized = _plain_text(text).replace("·", " / ").replace("—", "-").replace("–", "-")
     escaped = escape(normalized, quote=False)
-    return SOURCE_REF_RE.sub(r"<font color='#285D84'>[\1]</font>", escaped)
+    return SOURCE_REF_RE.sub(lambda m: f"<font color='#285D84'>[{m.group(1).replace('，', ',')}]</font>", escaped)
 
 
 def _plain_text(text: str) -> str:

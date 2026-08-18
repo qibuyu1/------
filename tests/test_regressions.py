@@ -408,7 +408,7 @@ class V23ComposeQualityTests(unittest.TestCase):
         body = "历史实验数据经过整理后可以帮助团队缩小下一轮候选范围，但最终仍要回到真实实验完成验证。" * 25
         markdown = "\n\n".join(f"## {h}\n\n{body}" for h in ["经验开始失去覆盖力", "失败实验被重新利用", "试错轮次真正被压缩", "数据基础仍是前提"])
         article = {"markdown": markdown, "understoodBrief": "解释数据驱动研发", "recommendedTitle": "研发试错正在换一种组织方式", "titleCandidates": ["研发试错正在换一种组织方式", "失败实验为什么开始有了第二次价值"]}
-        self.assertTrue(_needs_editorial_repair(article, length_spec={"min": 1000, "max": 10000, "target": 2000}, smart_sections=True, ai_cliche_guard=True, structure="默认 · 按内容自然组织"))
+        self.assertFalse(_needs_editorial_repair(article, length_spec={"min": 1000, "max": 10000, "target": 2000}, smart_sections=True, ai_cliche_guard=True, structure="默认 · 按内容自然组织"))
 
     def test_zero_body_image_count_still_starts_cover_job(self):
         from app import pipeline, deepseek, tavily
@@ -618,13 +618,16 @@ class V26QualityEfficiencyTests(unittest.TestCase):
         self.assertEqual(len({q for q, _ in calls if q}), 2)
         self.assertEqual(sum(1 for _, kind in calls if kind == "news"), 1)
 
-    def test_default_heading_naturalizer_removes_template_labels_only_in_default_mode(self):
-        from app.pipeline import _naturalize_default_structure
+    def test_default_heading_naturalizer_keeps_heading_count_and_flags_bare_template_label(self):
+        from app.pipeline import _naturalize_default_structure, _needs_editorial_repair
         md = "## 问题：经验为什么开始失效\n\n正文。\n\n## 机制：数据怎样缩小试错范围\n\n正文。\n\n## 判断\n\n正文。"
         natural = _naturalize_default_structure(md, "默认 · 按内容自然组织")
         self.assertIn("## 经验为什么开始失效", natural)
         self.assertIn("## 数据怎样缩小试错范围", natural)
-        self.assertNotIn("## 判断", natural)
+        self.assertIn("## 判断", natural)
+        self.assertEqual(natural.count("## "), 3)
+        article = {"markdown": natural, "understoodBrief": "解释研发变化", "recommendedTitle": "研发组织方式正在改变", "titleCandidates": ["研发组织方式正在改变"]}
+        self.assertTrue(_needs_editorial_repair(article, length_spec={"min": 1, "max": 9999, "target": 1200}, smart_sections=True, ai_cliche_guard=True, structure="默认 · 按内容自然组织"))
         self.assertEqual(_naturalize_default_structure(md, "问题—机制—案例—趋势"), md)
 
     def test_evidence_excerpt_is_shorter_and_keeps_relevant_facts(self):
@@ -1227,8 +1230,8 @@ class V30HybridCodeVisualTests(unittest.TestCase):
 
     def test_server_health_advertises_local_code_visuals(self):
         text = (ROOT / "server.py").read_text(encoding="utf-8")
-        self.assertIn('"codeVisualsAvailable": True', text)
-        self.assertIn('"version": "31.0"', text)
+        self.assertIn('"codeVisualsAvailable": code_visuals_available()', text)
+        self.assertIn('"version": "33.0"', text)
 
 
 class V31GenerationCoordinationTests(unittest.TestCase):
@@ -1274,7 +1277,7 @@ class V31GenerationCoordinationTests(unittest.TestCase):
         server = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn("waitForGenerationJob", js)
         self.assertIn("/api/generation/", js)
-        self.assertIn("generation_jobs.start(payload, generate_article)", server)
+        self.assertIn('generation_jobs.start(payload, generate_article, kind="generate")', server)
         self.assertIn("status=202", server)
 
 class V31VisualDecouplingTests(unittest.TestCase):
@@ -1312,6 +1315,121 @@ class V31VisualDecouplingTests(unittest.TestCase):
 class V31DeploymentCompatibilityTests(unittest.TestCase):
     def test_compose_assets_are_cache_busted_for_async_api_contract(self):
         html = (ROOT / "web" / "compose.html").read_text(encoding="utf-8")
-        self.assertIn('/compose.js?v=31', html)
-        self.assertIn('/common.js?v=31', html)
-        self.assertIn('/styles.css?v=31', html)
+        self.assertIn('/compose.js?v=33', html)
+        self.assertIn('/common.js?v=33', html)
+        self.assertIn('/styles.css?v=33', html)
+
+class V32CoordinationAndPersistenceTests(unittest.TestCase):
+    def test_revision_preserves_visual_spec_and_restarts_pending_visuals(self):
+        from app import pipeline
+        current = {
+            "recommendedTitle": "旧标题", "titleCandidates": ["旧标题"], "markdown": "旧正文",
+            "contentVersion": 3, "visualStatus": "pending", "visualJobToken": "old-token",
+            "visuals": [], "images": [], "sourceNotes": [],
+            "generationMeta": {
+                "calls": [],
+                "writingSpec": {"citations": False, "minChars": 1, "maxChars": 9999},
+                "visualSpec": {"bodyImageCount": 5, "imageStrategy": "all_diagram", "imagePreference": "混合", "imageMatchMode": "precise", "imageSourcePolicy": "balanced"},
+            },
+        }
+        record = {"article": current, "sources": [], "query": "数据治理"}
+        revised_payload = {"recommendedTitle": "新标题", "titleCandidates": ["新标题"], "markdown": "新正文", "_revisionMeta": {"apiCalled": True}}
+        captured = {}
+        with patch.object(pipeline.article_store, "get", return_value=record), \
+             patch.object(pipeline.article_store, "update", return_value=record) as update, \
+             patch.object(pipeline.article_store, "history_depth", return_value=1), \
+             patch.object(pipeline.deepseek, "available", return_value=True), \
+             patch.object(pipeline, "_llm_revise_article", return_value=revised_payload), \
+             patch.object(pipeline, "_start_visual_job", side_effect=lambda *a, **k: captured.update(k)):
+            article = pipeline.revise_article({"articleId": "a1", "instruction": "改好一点", "refreshImages": False})
+        self.assertEqual(article["generationMeta"]["visualSpec"]["bodyImageCount"], 5)
+        self.assertEqual(article["generationMeta"]["visualSpec"]["imageStrategy"], "all_diagram")
+        self.assertEqual(article["contentVersion"], 4)
+        self.assertEqual(article["visualStatus"], "pending")
+        self.assertEqual(captured["image_count"], 5)
+        self.assertEqual(captured["image_strategy"], "all_diagram")
+        self.assertEqual(captured["content_version"], 4)
+        self.assertTrue(update.called)
+
+    def test_runtime_visual_merge_rejects_stale_worker(self):
+        from app.article_store import ArticleStore
+        store = ArticleStore(max_items=4, ttl_seconds=60)
+        article_id = store.put({"markdown": "新版", "visualJobToken": "new", "contentVersion": 2, "visualStatus": "pending"}, sources=[], query="q")
+        rejected = store.update_runtime_fields(article_id, {"markdown": "旧版覆盖", "visualStatus": "ready"}, expected_visual_token="old", expected_content_version=1)
+        self.assertIsNone(rejected)
+        current = store.get(article_id)["article"]
+        self.assertEqual(current["markdown"], "新版")
+        self.assertEqual(current["visualStatus"], "pending")
+
+    def test_generation_queue_does_not_trim_live_jobs(self):
+        import threading, time
+        from app.generation_jobs import GenerationJobStore
+        gate = threading.Event()
+        store = GenerationJobStore(max_items=1, ttl_seconds=1, workers=2)
+        def worker(payload):
+            gate.wait(1.5)
+            return {"markdown": payload["q"]}
+        j1 = store.start({"q":"a"}, worker)
+        j2 = store.start({"q":"b"}, worker)
+        self.assertIsNotNone(store.get(j1["generationJobId"]))
+        self.assertIsNotNone(store.get(j2["generationJobId"]))
+        gate.set()
+        deadline=time.time()+2
+        while time.time()<deadline and any((store.get(j["generationJobId"]) or {}).get("status") not in {"ready","error"} for j in (j1,j2)):
+            time.sleep(.02)
+
+    def test_grouped_citations_survive_visual_binding_and_pdf_inline(self):
+        from app.content_blocks import plan_visual_slots
+        from app.exporter import _pdf_inline
+        article = {"recommendedTitle":"测试", "markdown":"## 机制\n\n这条判断同时来自两份权威材料，并共同说明数据治理正在进入经营应用阶段。[1,2]", "imageQueries":[], "imageSlots":[]}
+        slots = plan_visual_slots(article, "数据治理", max_body=1)
+        body = next(x for x in slots if x.get("kind") == "body")
+        self.assertIn("[1,2]", body["anchorText"])
+        self.assertIn("[1,2]", _pdf_inline("证据[1,2]"))
+
+    def test_long_source_keeps_late_query_relevant_evidence_for_revision(self):
+        from app.pipeline import _sources_for_revision_store
+        raw = ("前言与目录。" * 1500) + "关键证据：可信数据空间通过授权规则促进产业协同和数据流通。" + ("附录。" * 800)
+        stored = _sources_for_revision_store([{"type":"upload","title":"长报告","rawContent":raw}], "可信数据空间 产业协同")[0]
+        self.assertLessEqual(len(stored["rawContent"]), 11800)
+        self.assertIn("可信数据空间", stored["rawContent"])
+        self.assertIn("产业协同", stored["rawContent"])
+
+    def test_compose_can_resume_jobs_and_retry_transient_poll_failures(self):
+        js = (ROOT / "web" / "compose.js").read_text(encoding="utf-8")
+        self.assertIn('sessionStorage.setItem("deg.pendingJob"', js)
+        self.assertIn("restorePendingJobIfAvailable", js)
+        self.assertIn("[502, 503, 504].includes(response.status)", js)
+        self.assertIn("generationJobKind", js)
+
+    def test_revise_endpoint_is_async_too(self):
+        server = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn('generation_jobs.start(payload, revise_article, kind="revise")', server)
+
+    def test_topic_change_drops_only_old_auto_evidence(self):
+        js = (ROOT / "web" / "compose.js").read_text(encoding="utf-8")
+        self.assertIn("dropStaleAutoEvidence(topic)", js)
+        self.assertIn('src.autoEvidenceSelected || src.origin === "auto"', js)
+
+class V32FinalAuditTests(unittest.TestCase):
+    def test_export_title_override_updates_recommended_title(self):
+        text = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn('record["article"]["recommendedTitle"] = title_override', text)
+
+    def test_restore_original_ignores_runtime_token_only_difference(self):
+        from app.article_store import ArticleStore
+        store = ArticleStore(max_items=4, ttl_seconds=60)
+        article_id = store.put({"markdown":"正文","visualJobToken":"a","visualStatus":"ready","contentVersion":1}, sources=[], query="q")
+        record = store.get(article_id)
+        current = dict(record["article"]); current["visualJobToken"] = "b"
+        store.update(article_id, current, save_history=False)
+        restored = store.restore_original(article_id)
+        self.assertEqual(len(restored.get("history") or []), 0)
+
+    def test_event_listeners_are_bound_before_pending_job_wait_finishes(self):
+        js = (ROOT / "web" / "compose.js").read_text(encoding="utf-8")
+        start = js.index('const resumePromise = restorePendingJobIfAvailable();')
+        listener = js.index('$("#cancelGenerateButton").addEventListener', start)
+        finish = js.index('resumePromise.then', listener)
+        self.assertLess(start, listener)
+        self.assertLess(listener, finish)

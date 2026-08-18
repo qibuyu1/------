@@ -1,0 +1,15 @@
+{
+  "version": "V33.0",
+  "tests": "154 passed",
+  "qualityBenchmarkPassed": true,
+  "searchMinMargin": 86,
+  "tavilyPrimaryCalls": 5,
+  "serperFallbackCalls": 3,
+  "noSourceInitialImageCalls": 1,
+  "sourcePageInitialImageCalls": 0,
+  "smartVisualProvider": "generated-diagram",
+  "draftPromptChars": 8796,
+  "homeFeedCacheDays": 7,
+  "historyRetentionDays": 30,
+  "generationCommonPath": "single DeepSeek request; max two logical requests on salvage"
+}

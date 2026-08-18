@@ -100,14 +100,16 @@ class CoreTests(unittest.TestCase):
         calls=[]
         responses=[
             {"choices":[{"message":{"content":"not json"},"finish_reason":"stop"}],"usage":{"total_tokens":20}},
-            {"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"total_tokens":20}},
-            {"choices":[{"message":{"content":"# 一个真实标题\n\n这是正文。"},"finish_reason":"stop"}],"usage":{"total_tokens":30}},
+            {"choices":[{"message":{"content":"# 一个真实标题\n\n## 第一节\n\n这是正文。"},"finish_reason":"stop"}],"usage":{"total_tokens":30}},
         ]
         def fake_request(*args, **kwargs):
             calls.append(kwargs["payload"]); return responses.pop(0)
         with patch.object(deepseek, "settings", type("S", (), {"deepseek_api_key":"k","deepseek_model":"deepseek-v4-flash","deepseek_base_url":"https://api.deepseek.com"})()), patch.object(deepseek, "request_json", side_effect=fake_request):
             result=deepseek.generate_json("Write valid JSON.", "Return JSON article", max_tokens=1000)
-        self.assertEqual(len(calls),3)
+        self.assertEqual(len(calls),2)
+        self.assertIn("response_format", calls[0])
+        self.assertNotIn("response_format", calls[1])
+        self.assertEqual(calls[0]["thinking"]["type"], "disabled")
         self.assertTrue(result["_deepseekMeta"]["apiCalled"])
         self.assertIn("正文", result["markdown"])
 

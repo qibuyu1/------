@@ -4,6 +4,7 @@ import json
 import re
 import time
 import threading
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
 from datetime import date, datetime, timedelta
@@ -18,6 +19,8 @@ from .query_intent import understand, local_plan, DOMAIN_HINTS
 from .brief import understand_writing_brief, local_brief
 from .source_verify import verify_results
 from .visuals import resolve_visuals
+from .code_visuals import visual_fit_score
+from .history_store import history_store
 
 
 def _timed_call(fn, *args, **kwargs):
@@ -760,6 +763,67 @@ def _filter_results_by_date(results: list[dict[str, Any]], *, time_range: str, d
     return filtered
 
 
+def _raise_if_task_cancelled(payload: dict[str, Any]) -> None:
+    job_id = str((payload or {}).get("_generationJobId") or "").strip()
+    if not job_id:
+        return
+    try:
+        from .generation_jobs import generation_jobs
+        if generation_jobs.is_cancelled(job_id):
+            raise RuntimeError("任务已取消")
+    except ImportError:
+        return
+
+
+def _sources_for_revision_store(sources: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Persist a compact but upload-friendly evidence view for later revisions."""
+    out: list[dict[str, Any]] = []
+    for source in _prioritize_writing_sources(sources or []):
+        copy = dict(source)
+        raw = str(copy.get("rawContent") or copy.get("verifiedDescription") or copy.get("snippet") or "").strip()
+        uploaded = str(copy.get("type") or "") == "upload" or str(copy.get("origin") or "") == "upload"
+        cap = 23_500 if uploaded else 13_500
+        if len(raw) > cap:
+            head_size = 7_000 if uploaded else 5_200
+            focus_size = cap - head_size - 40
+            head = raw[:head_size].rsplit("。", 1)[0].strip()
+            focused = _evidence_excerpt(copy, query, limit=max(3000, focus_size)).strip()
+            combined = head
+            if focused and focused not in head:
+                combined = (head + "\n\n[主题相关摘录]\n" + focused).strip()
+            copy["rawContent"] = combined[:cap]
+        out.append(copy)
+    return out
+
+
+def _source_priority(source: dict[str, Any]) -> tuple[int, int, int]:
+    """Put user-provided material ahead of auto-discovered evidence."""
+    origin = str(source.get("origin") or "").lower()
+    typ = str(source.get("type") or "").lower()
+    uploaded = typ == "upload" or origin == "upload"
+    selected = bool(source.get("selectedByUser")) and origin != "auto"
+    verified = bool(source.get("sourceVerified"))
+    return (3 if uploaded else 2 if selected else 1, 1 if verified else 0, int(source.get("score") or 0))
+
+
+def _prioritize_writing_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable priority order used by prompts, citations and the exported source list."""
+    indexed = list(enumerate(sources or []))
+    indexed.sort(key=lambda pair: (*_source_priority(pair[1]), -pair[0]), reverse=True)
+    return [row for _idx, row in indexed]
+
+
+def _section_count_range(length_spec: dict[str, int]) -> tuple[int, int]:
+    """Wechat articles always need useful reading landmarks; image count is irrelevant."""
+    target = int((length_spec or {}).get("target") or 2100)
+    if target <= 1400:
+        return 3, 4
+    if target <= 2600:
+        return 4, 6
+    if target <= 4200:
+        return 5, 7
+    return 6, 8
+
 def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     """Generate a publication-ready article with explicit API/length guarantees.
 
@@ -802,7 +866,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     paragraph_rhythm = str(options.get("paragraphRhythm") or "默认 · 随内容调整").strip()[:80]
     evidence_style = str(options.get("evidenceStyle") or "默认 · 自然融入证据").strip()[:80]
     ai_cliche_guard = bool(options.get("aiClicheGuard", True))
-    smart_sections = bool(options.get("smartSections", True))
+    smart_sections = True  # V33:公众号正文固定保留自然小标题；不再暴露“智能小节”开关。
 
     if not deepseek.available():
         raise RuntimeError(
@@ -849,9 +913,13 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
         or s.get("type") == "upload"
         or ((s.get("selectedByUser") or s.get("autoEvidenceSelected")) and s.get("sourceUsable") and s.get("sourceStatus") == "indexed")
     ]
+    # User uploads/manual selections are primary evidence. Keep their numbering ahead
+    # of auto-search material so the model cannot silently crowd them out.
+    sources = _prioritize_writing_sources(sources)[:16]
     evidence_hydrated = 0
     if sources and tavily.available():
         sources, evidence_hydrated = _hydrate_sources_for_writing(query, sources)
+        sources = _prioritize_writing_sources(sources)[:16]
 
     # Keep writing and visual concerns separate.  The writing specification is
     # reused by editorial/length-repair prompts, so image-routing settings must
@@ -877,7 +945,6 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
         "citations": citations and bool(sources),
         "factCheck": factual,
         "autoEvidence": auto_evidence,
-        "smartSections": smart_sections,
     }
     visual_spec = {
         "coverImage": True,
@@ -900,6 +967,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     )
     calls.append({"stage": "draft", **meta})
     article["demo"] = False
+    article["query"] = query
     if angle:
         article.setdefault("understoodBrief", str(brief_plan.get("objective") or angle[:600]))
     article["understoodBriefPlan"] = brief_plan
@@ -951,6 +1019,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     _attach_sources(article, sources)
     if auto_evidence and not sources:
         article.setdefault("warnings", []).append("已开启自动补充资料，但本次没有检索到通过相关性与来源校验的可用材料；正文未把无来源事实当作真实案例写入。")
+    article["contentVersion"] = 1
     visual_token = uuid4().hex
     article["visualJobToken"] = visual_token
     article["visualStatus"] = "pending"
@@ -971,42 +1040,78 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
         auto_evidence_added=auto_evidence_added,
     )
 
-    article_id = article_store.put(article, sources=sources, query=query)
+    _raise_if_task_cancelled(payload)
+    article_id = article_store.put(article, sources=_sources_for_revision_store(sources, query), query=query)
     article["articleId"] = article_id
     article["historyDepth"] = 0
+    article["createdAt"] = time.time()
+    # History is a separate persistent, text-first archive. Failure is swallowed by
+    # HistoryStore and can never break the generation path.
+    article["historyRecordId"] = history_store.record(article, query=query, article_id=article_id)
     # Persist the id/token before background enrichment so the first UI render can be immediate.
     article_store.update(article_id, article, save_history=False)
-    _start_visual_job(article_id, query=query, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy, visual_token=visual_token)
+    _start_visual_job(article_id, query=query, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy, visual_token=visual_token, content_version=1)
     return article
 
 
-def _start_visual_job(article_id: str, *, query: str, image_count: int, image_preference: str, image_strategy: str = "smart", image_match_mode: str, image_source_policy: str, visual_token: str) -> None:
+def _start_visual_job(
+    article_id: str, *, query: str, image_count: int, image_preference: str,
+    image_strategy: str = "smart", image_match_mode: str, image_source_policy: str,
+    visual_token: str, content_version: int | None = None,
+) -> None:
+    """Run visual enrichment without letting a stale worker overwrite newer prose.
+
+    The worker renders against a private snapshot, then atomically merges only the
+    visual/runtime fields if both visual token and content version still match.
+    """
     def job() -> None:
         try:
             record = article_store.get(article_id)
             if not record:
                 return
-            current = record.get("article") or {}
-            if current.get("visualJobToken") != visual_token:
+            snapshot = record.get("article") or {}
+            expected_version = int(content_version if content_version is not None else (snapshot.get("contentVersion") or 0))
+            if snapshot.get("visualJobToken") != visual_token or int(snapshot.get("contentVersion") or 0) != expected_version:
                 return
-            _apply_visual_layout(current, query, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy)
-            current["visualStatus"] = "ready"
-            article_store.update(article_id, current, save_history=False)
+            work = deepcopy(snapshot)
+            _apply_visual_layout(
+                work, query, image_count=image_count, image_preference=image_preference,
+                image_strategy=image_strategy, image_match_mode=image_match_mode,
+                image_source_policy=image_source_policy,
+            )
+            work["visualStatus"] = "ready"
+            fields = {
+                key: deepcopy(work.get(key)) for key in
+                ("visualStatus", "visualReport", "visuals", "coverImage", "images", "blocks", "warnings")
+            }
+            # Initial-draft visuals are part of the user's real first version. Sync
+            # them into the restore-original snapshot only when still on version 1.
+            updated_record = article_store.update_runtime_fields(
+                article_id, fields, expected_visual_token=visual_token,
+                expected_content_version=expected_version, sync_original=(expected_version == 1),
+            )
+            if updated_record:
+                latest = deepcopy(updated_record.get("article") or {})
+                latest["articleId"] = article_id
+                history_store.update_by_article_id(article_id, latest, query=str(updated_record.get("query") or query))
         except Exception as exc:
             record = article_store.get(article_id)
             if not record:
                 return
             current = record.get("article") or {}
-            if current.get("visualJobToken") != visual_token:
-                return
-            current["visualStatus"] = "error"
-            current.setdefault("warnings", []).append(f"自动配图失败：{str(exc)[:180]}")
-            current["visualReport"] = {**(current.get("visualReport") or {}), "provider": "error"}
-            article_store.update(article_id, current, save_history=False)
-    # Give the article response / generation-job result a short head start before
-    # CPU-heavy PNG rendering and network image probing begin.  Starting the
-    # visual worker immediately could contend with JSON serialization on small
-    # deployments and made the newly added image system appear to break writing.
+            fields = {
+                "visualStatus": "error",
+                "visualReport": {**(current.get("visualReport") or {}), "provider": "error"},
+                "visualError": str(exc)[:300],
+            }
+            warnings = list(current.get("warnings") or [])
+            warnings.append(f"自动配图失败：{str(exc)[:180]}")
+            fields["warnings"] = warnings
+            article_store.update_runtime_fields(
+                article_id, fields, expected_visual_token=visual_token,
+                expected_content_version=int(content_version if content_version is not None else (current.get("contentVersion") or 0)),
+            )
+
     timer = threading.Timer(0.8, lambda: _VISUAL_POOL.submit(job))
     timer.daemon = True
     timer.start()
@@ -1035,12 +1140,12 @@ def _needs_editorial_repair(article: dict[str, Any], *, length_spec: dict[str, i
     if len([x for x in candidates if 12 <= len(x) <= 36]) < 2:
         return True
     headings = re.findall(r"^##\s+(.+)$", md, flags=re.M)
-    if smart_sections and len(headings) > 5:
+    section_min, section_max = _section_count_range(length_spec)
+    # 公众号长文必须有清楚的阅读路标。标题数量服从篇幅/论证，而不是图片数。
+    if len(headings) < section_min or len(headings) > section_max + 1:
         return True
-    # “默认”不是一个四段式模板。普通公众号文章默认 0—3 个小标题就够了；
-    # 如果模型仍然整齐地切成 4 个以上段落，送入一次编辑修复，让它合并能靠
-    # 过渡句自然连接的部分。用户主动选择了明确结构时不套这个限制。
-    if structure.startswith("默认") and len(headings) > 3:
+    bare_generic = {"问题", "做法", "机制", "原因", "影响", "条件", "判断", "趋势", "建议", "结论", "路径", "价值", "风险", "启示"}
+    if any(h.strip().rstrip("：:") in bare_generic for h in headings):
         return True
     outline_prefixes = ("问题", "做法", "机制", "原因", "影响", "条件", "判断", "趋势", "建议", "结论", "路径", "价值", "风险")
     templated = [h for h in headings if re.match(r"^(?:" + "|".join(outline_prefixes) + r")\s*[：:]", h.strip())]
@@ -1139,7 +1244,7 @@ def _research_for_article_evidence(query: str, description: str = "") -> dict[st
     first = research(base_payload)
     rows = list(first.get("results") or [])
     usable = [x for x in rows if x.get("sourceVerified") or x.get("sourceUsable")]
-    if len(usable) >= 4:
+    if len(usable) >= 3:
         return first
 
     plan = local_plan(query, description, "domestic-first")
@@ -1205,6 +1310,18 @@ def _hydrate_sources_for_writing(query: str, sources: list[dict[str, Any]]) -> t
             src["sourceImages"] = origin_images[:12]
     return copied, hydrated
 
+def _visual_settings_from_article(article: dict[str, Any]) -> dict[str, Any]:
+    meta = dict(article.get("generationMeta") or {})
+    spec = dict(meta.get("visualSpec") or {})
+    return {
+        "body_count": max(0, min(8, int(spec.get("bodyImageCount") or 3))),
+        "image_strategy": str(spec.get("imageStrategy") or "smart"),
+        "image_preference": str(spec.get("imagePreference") or "混合"),
+        "image_match_mode": str(spec.get("imageMatchMode") or "precise"),
+        "image_source_policy": str(spec.get("imageSourcePolicy") or "balanced"),
+    }
+
+
 def revise_article(payload: dict[str, Any]) -> dict[str, Any]:
     article_id = str(payload.get("articleId") or "").strip()
     instruction = str(payload.get("instruction") or "").strip()[:2000]
@@ -1226,16 +1343,10 @@ def revise_article(payload: dict[str, Any]) -> dict[str, Any]:
     sources = record.get("sources") or []
     query = str(record.get("query") or "数据要素")
     revised = _llm_revise_article(
-        current,
-        sources,
-        query=query,
-        scope=scope,
-        target_text=target_text,
-        target_heading=target_heading,
-        instruction=instruction,
+        current, sources, query=query, scope=scope, target_text=target_text,
+        target_heading=target_heading, instruction=instruction,
     )
     revision_meta = revised.pop("_revisionMeta", {})
-    # Keep layout metadata when the editor did not intentionally change it.
     revised.setdefault("coverBrief", current.get("coverBrief"))
     revised.setdefault("imageQueries", current.get("imageQueries") or [])
     revised.setdefault("imageSlots", current.get("imageSlots") or [])
@@ -1244,70 +1355,175 @@ def revise_article(payload: dict[str, Any]) -> dict[str, Any]:
     revised.setdefault("sourceNotes", current.get("sourceNotes") or [])
     revised.setdefault("socialSummary", current.get("socialSummary") or revised.get("deck") or "")
     revised["demo"] = False
+    revised["query"] = query
     revised["model"] = settings_model_name()
     revised["revisionSummary"] = str(revised.get("revisionSummary") or instruction)[:500]
+    revised["contentVersion"] = max(1, int(current.get("contentVersion") or 1) + 1)
+
     previous_meta = dict(current.get("generationMeta") or {})
     calls = list(previous_meta.get("calls") or [])
     if revision_meta:
         calls.append({"stage": "revision", **revision_meta})
-    spec = dict(previous_meta.get("writingSpec") or {})
-    revised["markdown"] = _strip_invalid_citations(str(revised.get("markdown") or ""), len(sources) if bool(spec.get("citations")) else 0)
+    writing_spec = dict(previous_meta.get("writingSpec") or {})
+    visual_spec = dict(previous_meta.get("visualSpec") or {})
+    revised["markdown"] = _strip_invalid_citations(
+        str(revised.get("markdown") or ""), len(sources) if bool(writing_spec.get("citations")) else 0
+    )
     actual_chars = _article_char_count(str(revised.get("markdown") or ""))
-    min_chars = int(spec.get("minChars") or 0)
-    max_chars = int(spec.get("maxChars") or 0)
+    min_chars = int(writing_spec.get("minChars") or 0)
+    max_chars = int(writing_spec.get("maxChars") or 0)
     within_target = (min_chars <= actual_chars <= max_chars) if min_chars and max_chars else True
     revised["generationMeta"] = _generation_meta(
-        calls, writing_spec=spec, actual_chars=actual_chars, within_target=within_target,
-        source_count=len(sources), auto_evidence_added=int(previous_meta.get("autoEvidenceAdded") or 0),
+        calls, writing_spec=writing_spec, visual_spec=visual_spec, actual_chars=actual_chars,
+        within_target=within_target, source_count=len(sources),
+        auto_evidence_added=int(previous_meta.get("autoEvidenceAdded") or 0),
     )
 
     _attach_sources(revised, sources)
-    if refresh_images:
-        body_count = max(0, int(spec.get("bodyImageCount") or 3))
-        revised["visualJobToken"] = uuid4().hex
+    _raise_if_task_cancelled(payload)
+    visual_cfg = _visual_settings_from_article({"generationMeta": revised["generationMeta"]})
+    # A pending/error visual state cannot simply be "kept": the old worker may be
+    # rendering an obsolete snapshot or may already have failed. Re-plan against
+    # the revised prose so the article cannot get stuck at visualStatus=pending.
+    should_refresh = refresh_images or str(current.get("visualStatus") or "ready") != "ready"
+    revised["visualJobToken"] = uuid4().hex
+    if should_refresh:
+        body_count = visual_cfg["body_count"]
         revised["visualStatus"] = "pending"
-        image_strategy = str(spec.get("imageStrategy") or "smart")
-        image_preference = str(spec.get("imagePreference") or "混合")
-        image_match_mode = str(spec.get("imageMatchMode") or "precise")
-        image_source_policy = str(spec.get("imageSourcePolicy") or "balanced")
-        revised["visualReport"] = {"planned": body_count + 1, "coverPlanned": 1, "placed": 0, "coverPlaced": 0, "bodyPlanned": body_count, "bodyPlaced": 0, "provider": "pending", "fallback": 0, "strategy": image_strategy}
+        revised["visualReport"] = {
+            "planned": body_count + 1, "coverPlanned": 1, "placed": 0,
+            "coverPlaced": 0, "bodyPlanned": body_count, "bodyPlaced": 0,
+            "provider": "pending", "fallback": 0, "strategy": visual_cfg["image_strategy"],
+        }
         revised["visuals"] = []
         revised["coverImage"] = None
         revised["images"] = []
         revised["blocks"] = merge_visuals_into_blocks(str(revised.get("markdown") or ""), [])
         article_store.update(article_id, revised, save_history=True)
-        _start_visual_job(article_id, query=query, image_count=body_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy, visual_token=revised["visualJobToken"])
+        _start_visual_job(
+            article_id, query=query, image_count=body_count,
+            image_preference=visual_cfg["image_preference"], image_strategy=visual_cfg["image_strategy"],
+            image_match_mode=visual_cfg["image_match_mode"], image_source_policy=visual_cfg["image_source_policy"],
+            visual_token=revised["visualJobToken"], content_version=revised["contentVersion"],
+        )
     else:
-        revised["visuals"] = current.get("visuals") or []
-        revised["coverImage"] = current.get("coverImage")
-        revised["images"] = current.get("images") or []
+        revised["visuals"] = deepcopy(current.get("visuals") or [])
+        revised["coverImage"] = deepcopy(current.get("coverImage"))
+        revised["images"] = deepcopy(current.get("images") or [])
         revised["blocks"] = merge_visuals_into_blocks(str(revised.get("markdown") or ""), revised["visuals"])
-        revised["visualReport"] = current.get("visualReport") or {}
-        revised["visualStatus"] = current.get("visualStatus") or "ready"
+        revised["visualReport"] = deepcopy(current.get("visualReport") or {})
+        revised["visualStatus"] = "ready"
         article_store.update(article_id, revised, save_history=True)
     revised["articleId"] = article_id
     revised["historyDepth"] = article_store.history_depth(article_id)
+    revised["historyRecordId"] = history_store.update_by_article_id(article_id, revised, query=query)
+    article_store.update(article_id, revised, save_history=False)
     return revised
+
+
+def _resume_visual_after_history_change(article_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    article = deepcopy(record.get("article") or {})
+    query = str(record.get("query") or "数据要素")
+    # Rotating the token invalidates every pre-undo/pre-restore visual worker.
+    article["visualJobToken"] = uuid4().hex
+    article.setdefault("contentVersion", 1)
+    status = str(article.get("visualStatus") or "ready")
+    if status == "pending":
+        cfg = _visual_settings_from_article(article)
+        article_store.update(article_id, article, save_history=False)
+        _start_visual_job(
+            article_id, query=query, image_count=cfg["body_count"],
+            image_preference=cfg["image_preference"], image_strategy=cfg["image_strategy"],
+            image_match_mode=cfg["image_match_mode"], image_source_policy=cfg["image_source_policy"],
+            visual_token=article["visualJobToken"], content_version=int(article.get("contentVersion") or 1),
+        )
+    else:
+        article_store.update(article_id, article, save_history=False)
+    article["articleId"] = article_id
+    article["historyDepth"] = article_store.history_depth(article_id)
+    article["historyRecordId"] = history_store.update_by_article_id(article_id, article, query=query)
+    article_store.update(article_id, article, save_history=False)
+    return article
 
 
 def undo_revision(article_id: str) -> dict[str, Any]:
     record = article_store.undo(article_id)
     if not record:
         raise ValueError("没有可以撤回的修改")
-    article = record.get("article") or {}
-    article["articleId"] = article_id
-    article["historyDepth"] = article_store.history_depth(article_id)
-    return article
+    return _resume_visual_after_history_change(article_id, record)
 
 
 def restore_original(article_id: str) -> dict[str, Any]:
     record = article_store.restore_original(article_id)
     if not record:
         raise ValueError("文章草稿已过期，请重新生成")
-    article = record.get("article") or {}
-    article["articleId"] = article_id
-    article["historyDepth"] = article_store.history_depth(article_id)
-    return article
+    return _resume_visual_after_history_change(article_id, record)
+
+
+def _validated_visual_plan(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    allowed = {"flow", "causal", "compare", "layered", "network", "timeline", "kpi", "matrix", "relation", "concept"}
+    if not isinstance(raw, dict):
+        return "", {}
+    kind = str(raw.get("visualType") or "").strip().lower()
+    if kind not in allowed:
+        kind = "concept"
+    plan: dict[str, Any] = {}
+    for key in ("title", "center", "relation", "leftTitle", "rightTitle", "xLabel", "yLabel"):
+        if raw.get(key) not in (None, ""):
+            plan[key] = str(raw.get(key))[:90]
+    for key in ("nodes", "steps", "items", "causes", "layers", "subtitles", "actors", "entities", "left", "right", "before", "after", "quadrants"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            plan[key] = [str((x.get("label") or x.get("title") or x.get("name")) if isinstance(x, dict) else x)[:80] for x in value[:6] if str(x).strip()]
+    for key in ("events", "metrics", "numbers"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            rows=[]
+            for row in value[:6]:
+                if isinstance(row, dict):
+                    rows.append({str(k)[:24]: str(v)[:80] for k,v in list(row.items())[:5]})
+            if rows: plan[key]=rows
+    edges=[]
+    for edge in raw.get("edges") or []:
+        if not isinstance(edge, dict): continue
+        a=str(edge.get("from") or "")[:80].strip(); b=str(edge.get("to") or "")[:80].strip(); label=str(edge.get("label") or "")[:80].strip()
+        if a and b: edges.append({"from":a,"to":b,"label":label})
+        if len(edges)>=8: break
+    if edges: plan["edges"]=edges
+    # A relation graphic with no relation is just decoration; demote to concept.
+    if kind == "relation" and not edges and len(plan.get("nodes") or []) < 3:
+        kind = "concept"
+    # KPI must be grounded in real values from the paragraph/planner.
+    if kind == "kpi" and not (plan.get("metrics") or plan.get("numbers")):
+        kind = "concept"
+    return kind, plan
+
+
+def _enrich_visual_plans(slots: list[dict[str, Any]], query: str, strategy: str) -> dict[str, Any]:
+    """One small async-stage LLM batch improves diagram completeness/relationships."""
+    candidates=[]
+    for slot in slots:
+        if slot.get("kind") != "body": continue
+        score = visual_fit_score(slot, query)
+        if strategy == "all_diagram" or (strategy == "diagram_first" and score >= 35) or (strategy == "smart" and score >= 58):
+            candidates.append(slot)
+    if not candidates or not deepseek.available():
+        return {"apiCalled": False, "planned": 0, "totalTokens": 0}
+    try:
+        data, meta = deepseek.plan_visuals(query, candidates)
+        by_id = {str(x.get("slotId") or ""): x for x in (data.get("plans") or []) if isinstance(x, dict)}
+        applied=0
+        for slot in candidates:
+            raw=by_id.get(str(slot.get("slotId") or ""))
+            if not raw: continue
+            kind, plan = _validated_visual_plan(raw)
+            if kind:
+                slot["visualType"] = kind; slot["visualPlan"] = plan; slot["visualIntent"] = "diagram"; applied += 1
+        return {**meta, "planned": applied}
+    except Exception as exc:
+        # Visual planning is optional and runs after prose delivery. Local heuristics
+        # remain a zero-failure fallback, so it can never break the article.
+        return {"apiCalled": False, "planned": 0, "totalTokens": 0, "warning": str(exc)[:180]}
 
 
 def _apply_visual_layout(
@@ -1363,7 +1579,7 @@ def _apply_visual_layout(
         # stronger provenance signal than asking the LLM to emit a separate
         # image-slot sourceId.  Bind it locally before semantic fallback.
         if requested_source_id <= 0:
-            cited = [int(x) for x in re.findall(r"\[(\d+)\]", str(slot.get("anchorText") or "")) if int(x) in source_by_n]
+            cited = [int(x) for x in re.findall(r"\d+", " ".join(re.findall(r"\[(?:\d+(?:\s*[,，]\s*\d+)*)\]", str(slot.get("anchorText") or "")))) if int(x) in source_by_n]
             if cited:
                 requested_source_id = cited[0]
         exact_row = source_by_n.get(requested_source_id)
@@ -1405,6 +1621,9 @@ def _apply_visual_layout(
         # falling back to Google Images.
         if ranked_hints and ranked_hints[0][0] >= 2:
             bind_source(slot, ranked_hints[0][3])
+    visual_plan_meta = _enrich_visual_plans(slots, query, image_strategy)
+    if visual_plan_meta.get("warning"):
+        article.setdefault("warnings", []).append("代码图关系规划未完成，已使用本地规则继续配图。")
     visuals, visual_warnings = resolve_visuals(
         slots, query, preference=image_preference, strategy=image_strategy, match_mode=image_match_mode, source_policy=image_source_policy
     )
@@ -1433,6 +1652,7 @@ def _apply_visual_layout(
         "serper": provider_counts.get("serper", 0),
         "generatedCover": provider_counts.get("generated-cover", 0),
         "generatedDiagram": provider_counts.get("generated-diagram", 0),
+        "diagramPlanner": {"planned": int(visual_plan_meta.get("planned") or 0), "totalTokens": int(visual_plan_meta.get("totalTokens") or 0)},
         "fallback": max(0, len(slots) - sum(1 for v in visuals if v.get("image"))),
         "provider": "serper" if provider_counts.get("serper") else (("source-origin" if provider_counts.get("source-origin") else "source-meta") if (provider_counts.get("source-origin") or provider_counts.get("source-meta")) else (("generated-diagram" if provider_counts.get("generated-diagram") else ("generated-cover" if provider_counts.get("generated-cover") else "none")))),
     }
@@ -1520,7 +1740,7 @@ def _article_char_count(markdown: str) -> int:
     import re
     text = re.sub(r"```.*?```", "", str(markdown or ""), flags=re.S)
     text = re.sub(r"^#{1,6}\s+.*$", "", text, flags=re.M)
-    text = re.sub(r"\[(\d+)\]", "", text)
+    text = re.sub(r"\[(?:\d+(?:\s*[,，]\s*\d+)*)\]", "", text)
     text = re.sub(r"[*_>`~\-]+", "", text)
     text = re.sub(r"\s+", "", text)
     return len(text)
@@ -1705,7 +1925,13 @@ def _evidence_excerpt(source: dict[str, Any], query: str, *, limit: int = 1700) 
 
 
 def _naturalize_default_structure(markdown: str, structure: str) -> str:
-    """Low-risk de-templating for default-mode headings, with no extra API call."""
+    """De-template headings without deleting reading landmarks.
+
+    V32 sometimes removed a generic heading entirely, which could collapse article
+    structure and accidentally make heading count track image slots. V33 only strips
+    mechanical prefixes when a specific heading remains; the editorial repair pass
+    is responsible for replacing bare generic headings.
+    """
     if not str(structure or "").startswith("默认"):
         return str(markdown or "")
     generic = ("问题", "做法", "机制", "原因", "影响", "条件", "判断", "趋势", "建议", "结论", "路径", "价值", "风险", "启示")
@@ -1713,16 +1939,10 @@ def _naturalize_default_structure(markdown: str, structure: str) -> str:
     for line in str(markdown or "").splitlines():
         m = re.match(r"^(##\s+)(.+)$", line.strip())
         if not m:
-            lines.append(line)
-            continue
+            lines.append(line); continue
         heading = m.group(2).strip()
         stripped = re.sub(r"^(?:" + "|".join(generic) + r")\s*[：:]\s*", "", heading)
-        if stripped != heading and len(re.sub(r"\s+", "", stripped)) >= 4:
-            lines.append("## " + stripped)
-            continue
-        if heading.rstrip("：:") in generic:
-            continue
-        lines.append(line)
+        lines.append("## " + stripped if stripped != heading and len(re.sub(r"\s+", "", stripped)) >= 4 else line)
     return "\n".join(lines).strip()
 
 
@@ -1738,18 +1958,30 @@ def _llm_article(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     length_spec = length_spec or _length_spec(length)
     source_pack = []
-    for idx, src in enumerate(sources[:6], start=1):
+    # Keep total prompt size controlled while giving uploaded/user-selected material
+    # more room than automatically discovered web snippets.
+    prompt_budget = 9800
+    for idx, src in enumerate(_prioritize_writing_sources(sources)[:8], start=1):
+        uploaded = str(src.get("type") or "") == "upload" or str(src.get("origin") or "") == "upload"
+        manual = bool(src.get("selectedByUser")) and str(src.get("origin") or "") != "auto"
+        per_limit = 3400 if uploaded else (1800 if manual else 850)
+        content = _evidence_excerpt(src, query, limit=min(per_limit, prompt_budget))
+        prompt_budget -= len(content)
         source_pack.append({
             "n": idx, "type": src.get("type"), "title": src.get("title"),
             "source": src.get("source"), "date": src.get("publishedAt"), "url": src.get("url"),
-            "content": _evidence_excerpt(src, query, limit=1700), "score": src.get("score"),
+            "origin": src.get("origin"), "userProvided": bool(uploaded or manual),
+            "content": content, "score": src.get("score"),
         })
+        if prompt_budget <= 0:
+            break
     evidence_rule = (
         "已提供来源。所有具体数字、政策名称、机构动作、论文结论和案例事实必须能对应来源编号。"
         if source_pack else
         "用户没有提供也没有要求自动检索佐证材料。不得虚构具体数字、政策名称、机构表态、论文结论或案例细节；"
         "文章应以概念解释、机制分析、常识性判断和明确标注的不确定性为主，且不要伪造 [1][2] 引用。"
     )
+    section_min, section_max = _section_count_range(length_spec)
     style_rule = _style_instruction(style, tone)
     control_rule = _control_instruction(
         audience=audience, title_mode=title_mode, structure=structure, opener=opener,
@@ -1762,6 +1994,7 @@ def _llm_article(
 写作底线：
 - 用户的“写作切口”是最高优先级编辑简报：必须决定标题角度、开头、信息取舍、论证顺序和结论；不要把切口原文机械复制进正文，也不要把它当作普通风格标签。
 - {evidence_rule}
+- 若来源中包含“上传文件/用户手动选择”的材料，它们是本次写作的一手编辑材料：相关观点必须优先阅读和使用，自动搜索资料只用于补充、核验和扩展，不能把上传材料挤出正文。
 - 段落之间必须有因果、转折、递进或解释关系，不写互不相干的信息块。先在内部确定一句中心判断和证据之间的关系，再落笔；不要在正文里宣布“本文将从几个方面展开”。
 - 每段优先使用具体主体和动作来推进（谁做了什么、数据改变了什么、为什么会这样），少用连续抽象名词堆叠；同一个判断不要换词重复三遍。
 - “默认”选项代表把结构判断交给成熟编辑直觉，不代表套一个默认模板。不要为了显得结构清晰而把文章切成整齐的六块；段落起句也不要连续复制“这意味着/更重要的是/从…来看”这一类编辑腔。
@@ -1785,7 +2018,7 @@ def _llm_article(
 如果用户填写了写作角度，把它视为编辑简报而不是“可选标签”：必须落实到标题、开头、主体取舍、章节顺序和结尾判断中。
 语言语气：{tone}
 标题偏好：{title_mode}
-结构偏好：{structure}
+结构偏好：{structure}；本篇建议 {section_min}—{section_max} 个 ## 二级小标题。
 开头方式：{opener}
 段落节奏：{paragraph_rhythm}
 证据表达：{evidence_style}
@@ -1794,7 +2027,7 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
 事实核验：{'开启' if factual else '常规'}
 保留来源编号：{'是' if citations else '否（不要生成引用编号）'}
 最终正文末尾不要自行添加“参考文献 / 参考来源 / 资料来源”章节；来源清单由系统内部管理，只有用户显式开启来源编号时正文内才出现 [1][2]。
-智能小节：{"开启" if smart_sections else "关闭"}；开启也不等于必须分点。允许 0—4 个 ## 小标题，只有当一次明显的论证转折确实值得给读者路标时才使用；小标题必须写本节的具体内容，不得使用“问题/做法/机制/影响/条件/判断”这类抽象栏目名加冒号，不得为配图或凑结构额外造标题。
+公众号结构：正文必须有 ## 二级小标题作为阅读路标；小标题数量由文章篇幅和论证转折决定，与配图数量完全独立。不得使用“问题/做法/机制/影响/条件/判断”这类抽象栏目名凑数，也不得为了配图增减分点。
 
 来源资料：
 {json.dumps(source_pack, ensure_ascii=False)}
@@ -1805,7 +2038,7 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
   "titleCandidates": ["标题1", "标题2", "标题3", "标题4", "标题5"],
   "recommendedTitle": "从标题候选中选出最适合微信公众号发布的一条",
   "deck": "80字以内导语",
-  "markdown": "完整正文；默认以自然文章为准。智能小节开启时仍允许 0—4 个 ## 二级标题，只有确实帮助阅读时才用；禁止固定六段式和抽象栏目式小标题。",
+  "markdown": "完整正文；必须有自然、具体、有信息量的 ## 二级小标题。小标题数量服从文章篇幅和论证需要，与图片数量无关；禁止固定六段式和抽象栏目式小标题。",
   "socialSummary": "120字以内简介",
   "keyClaims": [{{"claim":"核心事实或判断","sourceIds":[1],"confidence":"high|medium|low"}}],
   "riskNotes": ["需要复核的点"],
@@ -1815,7 +2048,7 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
 必须自检后再输出：
 1. 正文长度是否真正落在 {length_spec['min']}—{length_spec['max']} 字；如果明显过短，继续展开机制、例子（仅限来源支持）、影响和边界，而不是提前结束。
 2. {style} 与 {tone} 是否从开头到结尾一致，而不是只在第一段体现。
-3. 小标题数量是否真的有必要；若去掉小标题文章更顺，就减少或取消。凡保留的小标题都要具体、有信息量，且下面必须有完整论证。
+3. 小标题是否具体、有信息量、彼此句式不机械重复；正文必须保留自然分点，不能取消全部小标题。小标题数量只服从篇幅和论证，不得与配图数量绑定。
 4. 没有来源时绝不编造具体事实；有来源时具体事实尽量紧跟编号。
 5. 不要为了配图改变正文结构或制造小标题。封面、配图位置、源新闻回图、网络找图和代码绘图全部由文章完成后的本地视觉路由处理；本次写作只需要把正文和来源关系写清楚。"""
     max_tokens = max(3600, int(length_spec["target"] * 1.38) + 420)
@@ -1833,8 +2066,9 @@ def _llm_polish_article(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     source_digest = [
         {"n": i, "title": src.get("title"), "source": src.get("source"), "date": src.get("publishedAt"),
-         "content": _evidence_excerpt(src, query, limit=1250)}
-        for i, src in enumerate(sources, start=1)
+         "origin": src.get("origin"), "userProvided": bool(src.get("type") == "upload" or src.get("origin") == "upload" or (src.get("selectedByUser") and src.get("origin") != "auto")),
+         "content": _evidence_excerpt(src, query, limit=(2100 if (src.get("type") == "upload" or src.get("origin") == "upload") else 1050))}
+        for i, src in enumerate(_prioritize_writing_sources(sources)[:8], start=1)
     ]
     style_rule = _style_instruction(style, tone)
     control_rule = _control_instruction(
@@ -1856,7 +2090,7 @@ def _llm_polish_article(
 可核对来源：
 {json.dumps(source_digest, ensure_ascii=False)}
 
-重点检查：删除空话和重复，但用更具体的解释、机制、对比、证据和边界替代；保持所选风格和语气；事实与判断分开；不增加来源外事实；尤其检查“AI 提纲味”：若出现“问题/做法/机制/影响/条件/判断”等整齐栏目，合并章节、改成具体内容标题，或直接去掉小标题。智能小节开启时也只保留真正必要的 0—4 个，不为凑数量硬拆。
+重点检查：删除空话和重复，但用更具体的解释、机制、对比、证据和边界替代；保持所选风格和语气；事实与判断分开；不增加来源外事实。正文必须保留公众号阅读所需的自然小标题；若出现“问题/做法/机制/影响/条件/判断”等整齐栏目，改成该节真正的具体判断，不得把全部小标题删掉。小标题数量服从篇幅和论证，与配图数量无关。上传材料/用户手动选材是优先证据，相关内容必须保留其信息贡献。
 返回与首稿同结构的完整 JSON，并增加 "editorialNotes"。"""
     result = deepseek.generate_json(
         "你是中文科技与产业内容的终审主编。严格执行用户的风格、语气、结构和字数要求，只返回 JSON。",
@@ -1873,8 +2107,9 @@ def _llm_length_repair(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     current_count = _article_char_count(str(article.get("markdown") or ""))
     source_digest = [
-        {"n": i, "title": src.get("title"), "content": _evidence_excerpt(src, query, limit=1350)}
-        for i, src in enumerate(sources, start=1)
+        {"n": i, "title": src.get("title"), "origin": src.get("origin"),
+         "content": _evidence_excerpt(src, query, limit=(1900 if (src.get("type") == "upload" or src.get("origin") == "upload") else 1050))}
+        for i, src in enumerate(_prioritize_writing_sources(sources)[:8], start=1)
     ]
     direction = "扩写" if current_count < length_spec["min"] else "压缩"
     prompt = f"""对下面文章执行一次“长度校正”，不是重写成另一种风格。
@@ -1891,7 +2126,7 @@ def _llm_length_repair(
 - 返回完整 JSON，字段与原文一致。"""
     result = deepseek.generate_json(
         "你是严格执行篇幅约束的中文主编。目标是让正文进入指定字数区间，同时保持风格和事实边界。只返回 JSON。",
-        prompt, max_tokens=max(5200, int(length_spec["target"] * 1.7) + 600), temperature=0.35, reasoning_effort="high",
+        prompt, max_tokens=max(5200, int(length_spec["target"] * 1.7) + 600), temperature=0.35, reasoning_effort="off",
     )
     meta = _pop_meta(result)
     repaired = _sanitize_article(result, query)
@@ -1912,11 +2147,19 @@ def _llm_revise_article(
         "whole": "允许在原稿基础上整体修改，但必须保留原稿已确认的事实边界、来源关系和原始写作规格，除非用户明确要求改变",
     }
     scope_rule = scope_map.get(scope, scope_map["whole"])
-    source_pack = [
-        {"n": i, "type": src.get("type"), "title": src.get("title"), "source": src.get("source"),
-         "date": src.get("publishedAt"), "content": _evidence_excerpt(src, query, limit=1800)}
-        for i, src in enumerate(sources, start=1)
-    ]
+    source_pack = []
+    revision_budget = 10_500
+    for i, src in enumerate(_prioritize_writing_sources(sources)[:8], start=1):
+        uploaded = str(src.get("type") or "") == "upload" or str(src.get("origin") or "") == "upload"
+        limit = min(3300 if uploaded else 1150, revision_budget)
+        content = _evidence_excerpt(src, query, limit=max(400, limit))
+        revision_budget -= len(content)
+        source_pack.append({"n": i, "type": src.get("type"), "title": src.get("title"), "source": src.get("source"),
+                            "date": src.get("publishedAt"), "origin": src.get("origin"),
+                            "userProvided": bool(uploaded or (src.get("selectedByUser") and src.get("origin") != "auto")),
+                            "content": content})
+        if revision_budget <= 0:
+            break
     writing_spec = dict((current.get("generationMeta") or {}).get("writingSpec") or {})
     prompt = f"""请在当前文章基础上执行一次可控修改。
 主题：{query}
@@ -1938,13 +2181,14 @@ def _llm_revise_article(
 - 没被指定修改的部分不要顺手重写；局部修改保持原文风格和上下文。
 - 除非用户本次明确要求改变，否则继续遵守原始文章类型、语言语气、目标读者、结构和篇幅。
 - 若用户要求与来源冲突，以来源事实为准，并在 riskNotes 中说明。
+- 上传文件和用户手动选择的材料仍是改稿的一手依据；相关内容不得被自动搜索材料覆盖或遗忘。
 - 没有来源时不得新增具体数据、政策、机构表态、论文结论或虚构案例。
 - 如果修改二级标题，同步修正 imageSlots.afterHeading。
 - revisionSummary 用 1-3 句话概括实际改动。
 返回字段：titleCandidates, deck, markdown, coverBrief, imageQueries, imageSlots, socialSummary, keyClaims, riskNotes, sourceNotes, revisionSummary。"""
     result = deepseek.generate_json(
         "你是擅长局部改稿并保持上下文稳定的中文主编。严格遵守修改范围和原始写作规格，只返回 JSON。",
-        prompt, max_tokens=12000, temperature=0.42, reasoning_effort="high",
+        prompt, max_tokens=12000, temperature=0.42, reasoning_effort="off",
     )
     meta = _pop_meta(result)
     sanitized = _sanitize_article(result, query)
@@ -2033,7 +2277,7 @@ def _sanitize_article(article: dict[str, Any], query: str) -> dict[str, Any]:
 
 
 def _sanitize_image_slots(raw: Any) -> list[dict[str, Any]]:
-    allowed_types = {"flow", "causal", "compare", "layered", "network", "timeline", "kpi", "matrix", "concept"}
+    allowed_types = {"flow", "causal", "compare", "layered", "network", "timeline", "kpi", "matrix", "relation", "concept"}
     out: list[dict[str, Any]] = []
     if not isinstance(raw, list):
         return out
@@ -2065,6 +2309,13 @@ def _sanitize_image_slots(raw: Any) -> list[dict[str, Any]]:
                     else:
                         rows.append(str(row)[:80])
                 clean_plan[key] = rows
+        edges=[]
+        for edge in plan.get("edges") or []:
+            if not isinstance(edge, dict): continue
+            a=str(edge.get("from") or "")[:80].strip(); b=str(edge.get("to") or "")[:80].strip(); label=str(edge.get("label") or "")[:80].strip()
+            if a and b: edges.append({"from":a,"to":b,"label":label})
+            if len(edges)>=8: break
+        if edges: clean_plan["edges"] = edges
         try:
             source_id = max(0, int(item.get("sourceId") or 0))
         except (TypeError, ValueError):

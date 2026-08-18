@@ -3,14 +3,14 @@
   const $$ = GovernanceApp.$$;
   const state = {
     sources: [], article: null, topic: "数据要素", controller: null, generating: false, health: null,
-    selectedBlock: null, selectedText: "", selectedHeading: "", generationJobId: "",
+    selectedBlock: null, selectedText: "", selectedHeading: "", generationJobId: "", generationJobKind: "", generationEpoch: 0,
   };
   const progress = GovernanceApp.sailingProgress("compose");
 
   function inlineMarkdown(text = "") {
     return GovernanceApp.escapeHtml(text)
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\[([0-9]+)\]/g, '<span class="citation">[$1]</span>');
+      .replace(/\[([0-9]+(?:\s*[,，]\s*[0-9]+)*)\]/g, (m, ids) => `<span class="citation">[${ids.replace(/，/g, ",")}]</span>`);
   }
 
   function renderSources() {
@@ -118,6 +118,67 @@
     $("#cancelGenerateButton").hidden = !on;
   }
 
+  function renderFreshEmpty(message = "填写新主题后生成另一篇推文；写作设置会保留。") {
+    $("#articlePreview").innerHTML = `<div class="article-empty"><div class="empty-face">( •̀ ω •́ )✧</div><strong>准备生成一篇新的推文</strong><p>${GovernanceApp.escapeHtml(message)}</p></div>`;
+    $("#insightPanel").innerHTML = `<div class="article-empty"><div class="empty-face">(｡･ω･｡)</div><strong>新文章生成后查看标题候选和质量分析</strong></div>`;
+    $("#visualPanel").innerHTML = `<div class="article-empty"><div class="empty-face">(￣▽￣)ノ</div><strong>新文章生成后查看配图与来源</strong></div>`;
+  }
+
+  function resetCurrentArticle({ clearTopic = false, preserveManualSources = true } = {}) {
+    clearTimeout(visualPollTimer);
+    state.generationEpoch += 1;
+    state.article = null; state.selectedBlock = null; state.selectedText = ""; state.selectedHeading = "";
+    sessionStorage.removeItem("deg.articleId"); sessionStorage.removeItem("deg.lastGeneratedTopic"); clearPendingJob();
+    if (preserveManualSources) state.sources = state.sources.filter((src) => !(src.autoEvidenceSelected || src.origin === "auto"));
+    else state.sources = [];
+    GovernanceApp.saveEvidence(state.sources); renderSources(); enableActions(false, false); renderFreshEmpty();
+    if (clearTopic) { $("#topicInput").value = ""; $("#angleInput").value = ""; state.topic = ""; GovernanceApp.saveTopic(""); sessionStorage.removeItem("deg.autoEvidenceTopic"); }
+  }
+
+  function startAnotherArticle() {
+    if (state.generating) return GovernanceApp.toast("当前生成任务完成或停止后再开始另一篇");
+    resetCurrentArticle({ clearTopic: true, preserveManualSources: true });
+    switchTab("preview"); $("#topicInput").focus();
+    GovernanceApp.toast("已开启新推文；上传文件和手动选择的资料仍保留，上一主题自动资料已清除");
+  }
+
+  function formatHistoryTime(value) {
+    const n = Number(value || 0); if (!n) return "";
+    try { return new Date(n * 1000).toLocaleString("zh-CN", { hour12: false }); } catch { return ""; }
+  }
+
+  async function openHistory() {
+    const modal = $("#historyModal"); const list = $("#historyList"); if (!modal || !list) return;
+    modal.hidden = false; document.body.style.overflow = "hidden"; list.innerHTML = `<div class="history-empty">正在读取历史记录…</div>`;
+    try {
+      const res = await fetch("/api/history?limit=50", { cache: "no-store" }); const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "历史记录读取失败");
+      const items = data.items || [];
+      list.innerHTML = items.length ? items.map((x) => `<button class="history-row" type="button" data-history-id="${GovernanceApp.escapeHtml(x.historyId)}" data-article-id="${GovernanceApp.escapeHtml(x.articleId || "")}"><strong>${GovernanceApp.escapeHtml(x.title || x.query || "未命名稿件")}</strong><p>${GovernanceApp.escapeHtml(x.query || "")}</p><small>${GovernanceApp.escapeHtml(formatHistoryTime(x.updatedAt || x.createdAt))}</small></button>`).join("") : `<div class="history-empty">还没有历史稿件。生成第一篇后会自动记录。</div>`;
+    } catch (e) { list.innerHTML = `<div class="history-empty">${GovernanceApp.escapeHtml(e.message || "历史记录读取失败")}</div>`; }
+  }
+
+  function closeHistory() { const modal = $("#historyModal"); if (modal) modal.hidden = true; document.body.style.overflow = ""; }
+
+  async function loadHistoryArticle(historyId, liveArticleId = "") {
+    try {
+      let article = null;
+      if (liveArticleId) {
+        const live = await fetch(`/api/article/${encodeURIComponent(liveArticleId)}`, { cache: "no-store" });
+        if (live.ok) article = await live.json();
+      }
+      if (!article) {
+        const res = await fetch(`/api/history/${encodeURIComponent(historyId)}`, { cache: "no-store" }); const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "历史稿件读取失败"); article = data;
+      }
+      clearTimeout(visualPollTimer); state.generationEpoch += 1; state.article = article; state.topic = article.query || state.topic;
+      renderArticle(article); renderInsights(article); switchTab("preview"); closeHistory();
+      const live = Boolean(article.articleId && !article.archived); enableActions(live, live && article.visualStatus !== "pending");
+      if (article.archived) $("#articlePreview").insertAdjacentHTML("afterbegin", `<div class="archive-notice">这是历史快照，可阅读和复制；若原实时草稿已过期，请点“生成其他推文”重新开始，不会覆盖这份历史记录。</div>`);
+      if (live && article.visualStatus === "pending") watchVisualJob(article.articleId);
+    } catch (e) { GovernanceApp.toast(e.message || "历史稿件读取失败"); }
+  }
+
   async function uploadFiles(files) {
     const list = [...(files || [])]; if (!list.length) return;
     if (state.generating) return GovernanceApp.toast("当前任务完成后再上传文件");
@@ -143,6 +204,7 @@
 
   async function autoCollect({ silent = false, signal = null } = {}) {
     const q = $("#topicInput").value.trim() || "数据要素";
+    dropStaleAutoEvidence(q);
     const description = $("#angleInput")?.value.trim() || "";
     let ownController = null;
     if (!silent) {
@@ -156,7 +218,7 @@
       const liveRows = (data.results || []).filter((row) => row.sourceVerified || row.sourceUsable);
       const picked = chooseSources(liveRows);
       state.sources = mergeSources(state.sources, picked);
-      state.topic = q; GovernanceApp.saveTopic(q); GovernanceApp.saveEvidence(state.sources); renderSources();
+      state.topic = q; GovernanceApp.saveTopic(q); GovernanceApp.saveEvidence(state.sources); sessionStorage.setItem("deg.autoEvidenceTopic", q); renderSources();
       if (!silent) { finishComposeProgress(state.sources.length ? `证据整理完成，共 ${state.sources.length} 条资料。` : "当前未检索到可用佐证材料。"); GovernanceApp.toast(state.sources.length ? `当前共引用 ${state.sources.length} 条资料` : "当前未检索到可用佐证材料，可调整主题后重试"); }
       return state.sources;
     } catch (error) {
@@ -282,9 +344,34 @@
     const normalized = rows.map((src, i) => ({
       ...src, id: src.id || `generated-source-${src.n || i + 1}`, origin: src.origin || "auto", autoEvidenceSelected: true,
     }));
-    state.sources = mergeSources(state.sources, normalized);
+    const manual = state.sources.filter((src) => !(src.autoEvidenceSelected || src.origin === "auto"));
+    state.sources = mergeSources(manual, normalized);
     GovernanceApp.saveEvidence(state.sources);
+    if (state.topic) sessionStorage.setItem("deg.autoEvidenceTopic", state.topic);
     renderSources();
+  }
+
+  function savePendingJob(jobId, kind, topic = "") {
+    if (!jobId) return sessionStorage.removeItem("deg.pendingJob");
+    sessionStorage.setItem("deg.pendingJob", JSON.stringify({ jobId, kind: kind || "generate", topic: topic || state.topic, savedAt: Date.now() }));
+  }
+
+  function clearPendingJob(jobId = "") {
+    try {
+      const current = JSON.parse(sessionStorage.getItem("deg.pendingJob") || "{}");
+      if (!jobId || current.jobId === jobId) sessionStorage.removeItem("deg.pendingJob");
+    } catch { sessionStorage.removeItem("deg.pendingJob"); }
+  }
+
+  function dropStaleAutoEvidence(topic) {
+    const previous = sessionStorage.getItem("deg.autoEvidenceTopic") || sessionStorage.getItem("deg.lastGeneratedTopic") || "";
+    if (!previous || previous === topic) return;
+    const before = state.sources.length;
+    state.sources = state.sources.filter((src) => !(src.autoEvidenceSelected || src.origin === "auto"));
+    if (state.sources.length !== before) {
+      GovernanceApp.saveEvidence(state.sources); renderSources(); sessionStorage.removeItem("deg.autoEvidenceTopic");
+      GovernanceApp.toast("主题已变化：已移除上一主题自动补充的资料，上传文件和手动选择资料仍保留");
+    }
   }
 
   async function waitForGenerationJob(jobId, signal) {
@@ -292,12 +379,22 @@
     let pollDelay = 900;
     while (true) {
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      const response = await fetch(`/api/generation/${encodeURIComponent(jobId)}`, { cache: "no-store", signal });
-      const job = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(job.error || `生成任务查询失败 (${response.status})`);
-      if (job.status === "ready" && job.article) return job.article;
-      if (job.status === "error") throw new Error(job.error || "DeepSeek 暂时没有返回完整文章，请稍后重试。");
-      if (job.status === "cancelled") throw new DOMException("Aborted", "AbortError");
+      let response = null; let job = {};
+      try {
+        response = await fetch(`/api/generation/${encodeURIComponent(jobId)}`, { cache: "no-store", signal });
+        job = await response.json().catch(() => ({}));
+      } catch (e) {
+        if (e?.name === "AbortError") throw e;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(2200, pollDelay + 400)));
+        continue;
+      }
+      if (!response.ok) {
+        if ([502, 503, 504].includes(response.status)) { await new Promise((resolve) => setTimeout(resolve, Math.min(2200, pollDelay + 400))); continue; }
+        throw new Error(job.error || `任务查询失败 (${response.status})`);
+      }
+      if (job.status === "ready" && job.article) { clearPendingJob(jobId); return job.article; }
+      if (job.status === "error") { clearPendingJob(jobId); throw new Error(job.error || "DeepSeek 暂时没有返回完整文章，请稍后重试。"); }
+      if (job.status === "cancelled") { clearPendingJob(jobId); throw new DOMException("Aborted", "AbortError"); }
       const elapsed = Math.max(0, Date.now() - started);
       if (elapsed > 12 * 60 * 1000) throw new Error("生成等待时间过长，任务已停止轮询。请检查 DeepSeek 服务状态后重试。");
       if (elapsed > 85000) setComposeProgress(82, "DeepSeek 仍在生成，网页连接已切换为后台任务轮询，不会再因为代理超时丢稿。", "正在生成");
@@ -325,11 +422,18 @@
     if (!jobId) return;
     try {
       await GovernanceApp.api("/api/generation/cancel", { generationJobId: jobId });
-    } catch {}
+    } catch {} finally { clearPendingJob(jobId); }
   }
 
   async function generate() {
     if (state.generating) return; const topic = $("#topicInput").value.trim(); if (!topic) return GovernanceApp.toast("请输入文章主题");
+    dropStaleAutoEvidence(topic);
+    // A new click is a new article generation, never a mutation of the last draft.
+    // Clear the old preview before the request so a failed second request cannot
+    // masquerade as "the previous article was generated again".
+    clearTimeout(visualPollTimer); state.generationEpoch += 1; const epoch = state.generationEpoch;
+    state.article = null; sessionStorage.removeItem("deg.articleId"); enableActions(false, false);
+    $("#articlePreview").innerHTML = `<div class="article-empty"><div class="empty-face">(ง •̀_•́)ง</div><strong>正在生成新的推文</strong><p>上一份稿件已进入历史记录，本次结果不会与它混用。</p></div>`;
     state.topic = topic; GovernanceApp.saveTopic(topic); state.controller = new AbortController(); setGenerating(true);
     setComposeProgress(4, "正在检查主题、证据和写作参数…");
     scheduleComposeStages([
@@ -341,16 +445,11 @@
     ]);
     try {
       const autoEvidence = $("#autoEvidenceToggle").checked;
-      if (!state.sources.length && autoEvidence) {
-        try {
-          await autoCollect({ silent: true, signal: state.controller.signal });
-          setComposeProgress(25, state.sources.length ? `已整理 ${state.sources.length} 条证据，开始写作。` : "前端检索暂未命中，生成端会继续自动补充资料。");
-        } catch (e) {
-          if (e?.name === "AbortError") throw e;
-          setComposeProgress(25, "前端资料检索暂时失败，生成端将继续执行自动补充，不中断写作。");
-        }
-      }
-      if (!state.sources.length && !autoEvidence) setComposeProgress(25, "不自动添加佐证材料，直接按当前主题与写作规格调用 DeepSeek。");
+      // V33: generation owns automatic evidence search on the backend. The old
+      // frontend pre-search added an extra blocking round trip and failure surface.
+      // “现在补全” remains available when the editor wants to inspect sources first.
+      if (!state.sources.length && autoEvidence) setComposeProgress(20, "生成端正在并行理解主题并补充证据，不再额外等待一次前端检索。", "正在生成");
+      if (!state.sources.length && !autoEvidence) setComposeProgress(20, "已关闭自动佐证：直接按主题与写作要求生成。", "正在生成");
       const generationStart = await GovernanceApp.api("/api/generate", {
         query: topic, description: $("#angleInput").value.trim(), sources: state.sources,
         options: {
@@ -358,21 +457,24 @@
           angle: $("#angleInput").value.trim(), tone: $("#toneSelect").value, titleMode: $("#titleMode").value,
           structure: $("#structureSelect").value, closingMode: $("#closingMode").value, opener: $("#openerSelect").value,
           paragraphRhythm: $("#rhythmSelect").value, evidenceStyle: $("#evidenceStyle").value, qualityMode: $("#qualityMode").value,
-          aiClicheGuard: $("#clicheToggle").checked, smartSections: $("#smartSectionsToggle").checked, autoEvidence, bodyImageCount: getBodyImageCount(), imagePreference: $("#imagePreference").value,
+          aiClicheGuard: $("#clicheToggle").checked, autoEvidence, bodyImageCount: getBodyImageCount(), imagePreference: $("#imagePreference").value,
           imageStrategy: $("#imageStrategy")?.value || "smart", imageMatchMode: $("#imageMatchMode").value, imageSourcePolicy: $("#imageSourcePolicy").value, citations: $("#citationToggle").checked, factCheck: $("#factToggle").checked,
         },
       }, { signal: state.controller.signal });
-      state.generationJobId = generationStart?.generationJobId || "";
+      state.generationJobId = generationStart?.generationJobId || ""; state.generationJobKind = "generate";
+      if (state.generationJobId) savePendingJob(state.generationJobId, "generate", topic);
       const article = state.generationJobId ? await waitForGenerationJob(state.generationJobId, state.controller.signal) : generationStart;
-      state.article = article; syncAutoEvidenceFromArticle(article); renderArticle(article); renderInsights(article); enableActions(true, article.visualStatus !== "pending"); $("#undoRevision").disabled = !(article.historyDepth > 0); switchTab("preview");
+      if (epoch !== state.generationEpoch) return;
+      state.article = article; sessionStorage.setItem("deg.lastGeneratedTopic", topic); syncAutoEvidenceFromArticle(article); renderArticle(article); renderInsights(article); enableActions(true, article.visualStatus !== "pending"); $("#undoRevision").disabled = !(article.historyDepth > 0); switchTab("preview");
       finishComposeProgress(article.visualStatus === "pending" ? "正文已经生成；封面和正文配图正在后台匹配，不耽误你先读文章。" : "图文稿已经整理完成。", "文章完成");
       const gm = article.generationMeta || {}; GovernanceApp.toast(article.warnings?.[0] || `DeepSeek 已调用 ${gm.callCount || 0} 次：正文约 ${gm.actualChars || "—"} 字 · ${gm.totalTokens || 0} Token`);
       watchVisualJob(article.articleId);
     } catch (error) {
+      if (epoch !== state.generationEpoch) return;
       hideComposeProgress();
       if (error.name === "AbortError") { GovernanceApp.toast("已停止本次生成"); if (!state.article) $("#articlePreview").innerHTML = `<div class="article-empty"><div class="empty-face">(－_－) zzZ</div><strong>本次生成已停止</strong><p>左侧设置都还保留着，改完可以继续。</p></div>`; }
       else { GovernanceApp.toast(error.message || "生成失败"); if (!state.article) $("#articlePreview").innerHTML = `<div class="article-empty"><div class="empty-face">(╥﹏╥)</div><strong>这次没写成</strong><p>${GovernanceApp.escapeHtml(error.message || "服务暂时没有返回完整文章，请稍后重试。")}</p></div>`; }
-    } finally { state.controller = null; state.generationJobId = ""; setGenerating(false); }
+    } finally { state.controller = null; state.generationJobId = ""; state.generationJobKind = ""; setGenerating(false); }
   }
 
   let visualPollTimer = null;
@@ -401,7 +503,9 @@
             GovernanceApp.toast("文章已完成；部分配图处理失败，可在“配图与来源”里查看具体位置");
           }
         }
-      } catch {}
+      } catch {
+        if (state.article?.articleId === articleId) visualPollTimer = setTimeout(poll, 2200);
+      }
     };
     poll();
   }
@@ -442,10 +546,14 @@
     state.controller = new AbortController(); setGenerating(true); setComposeProgress(8, "正在读取你的修改要求…", "正在改稿");
     scheduleComposeStages([[900, 28, "正在定位你指定的句子 / 段落，别的地方先不乱动。", "正在改稿"], [2600, 55, "DeepSeek 正在按要求重写，同时守住原来的事实边界。", "正在改稿"], [5200, 78, "正在检查上下文衔接和来源编号有没有被改乱。", "正在改稿"], [7600, 91, $("#refreshImagesToggle").checked ? "正在重新核对配图位置。" : "保留原配图，正在重新整理文章结构。", "正在改稿"]]);
     try {
-      const article = await GovernanceApp.api("/api/revise", { articleId: state.article.articleId, scope, targetText, targetHeading, instruction, refreshImages: $("#refreshImagesToggle").checked }, { signal: state.controller.signal });
+      const revisionStart = await GovernanceApp.api("/api/revise", { articleId: state.article.articleId, scope, targetText, targetHeading, instruction, refreshImages: $("#refreshImagesToggle").checked }, { signal: state.controller.signal });
+      state.generationJobId = revisionStart?.generationJobId || ""; state.generationJobKind = "revise";
+      if (state.generationJobId) savePendingJob(state.generationJobId, "revise", state.topic);
+      const article = state.generationJobId ? await waitForGenerationJob(state.generationJobId, state.controller.signal) : revisionStart;
       state.article = article; renderArticle(article); renderInsights(article); $("#revisionInstruction").value = ""; $("#undoRevision").disabled = !(article.historyDepth > 0); finishComposeProgress(article.revisionSummary || "修改完成。"); GovernanceApp.toast("已按要求完成修改，可以继续改或直接导出");
+      if (article.visualStatus === "pending") watchVisualJob(article.articleId);
     } catch (e) { hideComposeProgress(); GovernanceApp.toast(e.name === "AbortError" ? "已停止本次修改" : (e.message || "修改失败")); }
-    finally { state.controller = null; setGenerating(false); }
+    finally { state.controller = null; state.generationJobId = ""; state.generationJobKind = ""; setGenerating(false); }
   }
 
   async function revisionAction(path, successText) {
@@ -519,10 +627,12 @@
     const el = $("#imageProviderStatus");
     try {
       state.health = await GovernanceApp.getHealth();
-      if (state.health.serperImagesConfigured) {
-        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>混合配图已就绪：源新闻 + Serper + 本地代码绘图</strong><small>真实案例优先回到来源页面找原图；结构化分析可直接画；找不到可靠真实图时再绘制解释图。</small></div>`;
+      if (!state.health.codeVisualsAvailable) {
+        el.className = "image-provider-status warn"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>代码视觉缺少中文字体，已禁止生成乱码图</strong><small>请安装 Noto CJK 字体；在此之前系统只使用可靠真实图片，不会再输出方块字图片。</small></div>`;
+      } else if (state.health.serperImagesConfigured) {
+        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>混合配图已就绪：源新闻 + Serper + 本地代码绘图</strong><small>真实案例优先回到来源页面找原图；结构化分析可用关系图/流程图解释；弱匹配图不会硬塞。</small></div>`;
       } else {
-        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>本地代码视觉引擎已就绪 · Serper 未配置</strong><small>仍可使用智能混合 / 解释图优先 / 全部代码绘图；若希望补充真实网络图片，再在 .env 配置 SERPER_API_KEY。</small></div>`;
+        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>本地代码视觉引擎已就绪 · Serper 未配置</strong><small>仍可使用解释图；若希望补充真实网络图片，再在 .env 配置 SERPER_API_KEY。</small></div>`;
       }
       const llm = $("#generationApiStatus");
       if (state.health.deepseekConfigured) {
@@ -540,6 +650,25 @@
       el.className = "image-provider-status warn"; el.querySelector("strong").textContent = "图片服务状态读取失败";
       const llm = $("#generationApiStatus"); if (llm) { llm.className = "generation-api-status warn"; llm.querySelector("strong").textContent = "DeepSeek 服务状态读取失败"; }
     }
+  }
+
+  async function restorePendingJobIfAvailable() {
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem("deg.pendingJob") || "null"); } catch {}
+    if (!saved?.jobId || Date.now() - Number(saved.savedAt || 0) > 45 * 60 * 1000) { clearPendingJob(); return false; }
+    state.generationJobId = saved.jobId; state.generationJobKind = saved.kind || "generate";
+    state.topic = saved.topic || state.topic; if (state.topic) $("#topicInput").value = state.topic;
+    state.controller = new AbortController(); setGenerating(true);
+    setComposeProgress(55, saved.kind === "revise" ? "正在恢复未完成的改稿任务…" : "正在恢复未完成的生成任务…", "正在恢复");
+    try {
+      const article = await waitForGenerationJob(saved.jobId, state.controller.signal);
+      state.article = article; if ((saved.kind || "generate") === "generate" && state.topic) sessionStorage.setItem("deg.lastGeneratedTopic", state.topic); syncAutoEvidenceFromArticle(article); renderArticle(article); renderInsights(article); enableActions(true, article.visualStatus !== "pending"); switchTab("preview");
+      if (article.visualStatus === "pending") watchVisualJob(article.articleId); else finishComposeProgress("已恢复并完成上次任务。", "已恢复");
+      return true;
+    } catch (e) {
+      if (e?.name !== "AbortError") GovernanceApp.toast(e.message || "上次任务无法恢复");
+      clearPendingJob(saved.jobId); return false;
+    } finally { state.controller = null; state.generationJobId = ""; state.generationJobKind = ""; setGenerating(false); }
   }
 
   async function restoreDraftIfAvailable() {
@@ -560,16 +689,20 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    state.sources = GovernanceApp.loadEvidence(); state.topic = GovernanceApp.loadTopic() || "数据要素"; $("#topicInput").value = state.topic; renderSources(); initComposeColumnSync(); syncImageStrategyControls(); loadProviderStatus(); restoreDraftIfAvailable();
+    state.sources = GovernanceApp.loadEvidence(); state.topic = GovernanceApp.loadTopic() || "数据要素"; $("#topicInput").value = state.topic; renderSources(); initComposeColumnSync(); syncImageStrategyControls(); loadProviderStatus();
+    const resumePromise = restorePendingJobIfAvailable();
     $("#sourceList").addEventListener("click", (e) => { const b = e.target.closest("[data-remove-source]"); if (!b) return; state.sources = state.sources.filter((s) => s.id !== b.dataset.removeSource); GovernanceApp.saveEvidence(state.sources); renderSources(); });
     const zone = $("#uploadZone"); zone.addEventListener("click", () => $("#fileInput").click()); zone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") $("#fileInput").click(); });
     zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("dragging"); }); zone.addEventListener("dragleave", () => zone.classList.remove("dragging")); zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("dragging"); uploadFiles(e.dataTransfer.files); }); $("#fileInput").addEventListener("change", (e) => uploadFiles(e.target.files));
     $("#autoSourceButton").addEventListener("click", () => autoCollect()); $("#generateButton").addEventListener("click", generate); $("#cancelGenerateButton").addEventListener("click", cancelGenerationJob);
+    $("#newArticleButton")?.addEventListener("click", startAnotherArticle); $("#historyButton")?.addEventListener("click", openHistory); $("#closeHistoryButton")?.addEventListener("click", closeHistory); $("#historyModal")?.addEventListener("click", (e) => { if (e.target.closest("[data-close-history]")) closeHistory(); });
+    $("#historyList")?.addEventListener("click", (e) => { const row = e.target.closest("[data-history-id]"); if (row) loadHistoryArticle(row.dataset.historyId, row.dataset.articleId || ""); });
     $$('[data-tab]').forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab))); $("#insightPanel").addEventListener("click", (e) => { const b = e.target.closest("[data-title]"); if (b) selectTitle(b.dataset.title); });
     $("#articlePreview").addEventListener("click", (e) => { const el = e.target.closest(".editable-block"); if (el) { selectEditableBlock(el); if (!$("#revisionPanel").hidden) updateRevisionTarget(); } }); $("#articlePreview").addEventListener("mouseup", () => setTimeout(captureTextSelection, 0));
     $("#reviseButton").addEventListener("click", openRevision); $("#closeRevision").addEventListener("click", () => $("#revisionPanel").hidden = true); $("#applyRevision").addEventListener("click", applyRevision); $("#undoRevision").addEventListener("click", () => revisionAction("/api/article/undo", "已撤回上一次修改")); $("#restoreOriginal").addEventListener("click", () => revisionAction("/api/article/restore", "已恢复到初稿；刚才的版本仍可通过撤回找回"));
     $("#imageCount")?.addEventListener("change", (e) => { const custom = e.target.value === "custom"; const input = $("#customImageCount"); if (input) input.hidden = !custom; });
     $("#imageStrategy")?.addEventListener("change", syncImageStrategyControls);
     $("#copyButton").addEventListener("click", copyWechat); $("#htmlButton").addEventListener("click", downloadHtml); $("#docxButton").addEventListener("click", () => exportFile("docx")); $("#pdfButton").addEventListener("click", () => exportFile("pdf")); $("#mdButton").addEventListener("click", downloadMarkdown);
+    resumePromise.then((resumed) => { if (!resumed) restoreDraftIfAvailable(); });
   });
 })();

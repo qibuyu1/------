@@ -26,7 +26,7 @@ class ServerSmokeTests(unittest.TestCase):
     def test_health_and_search_page(self):
         with urllib.request.urlopen(self.base + "/api/health", timeout=3) as response:
             health = json.loads(response.read().decode("utf-8"))
-        self.assertEqual(health["version"], "31.0")
+        self.assertEqual(health["version"], "33.0")
         with urllib.request.urlopen(self.base + "/search.html", timeout=3) as response:
             html = response.read().decode("utf-8")
         self.assertIn("数据要素资料检索", html)

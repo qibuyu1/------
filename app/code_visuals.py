@@ -56,6 +56,8 @@ _ANALYTIC_TERMS = {
 
 
 def build_cover_data_uri(title: str, brief: str = '', query: str = '') -> str:
+    if not code_visuals_available():
+        raise RuntimeError('本地代码视觉缺少中文字体，请安装 Noto CJK 字体后重试')
     title = ' '.join(str(title or '数据专题').split())[:84]
     brief = ' '.join(str(brief or '').split())[:96]
     img = _build_cover(choose_cover_style(title, brief, query), title, brief or query)
@@ -87,10 +89,10 @@ def visual_fit_score(slot: dict[str, Any], query: str) -> int:
         return 100
     if intent == 'real':
         return 5
-    text = ' '.join(str(slot.get(k) or '') for k in ('afterHeading', 'anchorText', 'purpose', 'query'))
+    text = ' '.join(str(slot.get(k) or '') for k in ('afterHeading', 'anchorText', 'contextText', 'purpose', 'query'))
     kind = suggest_body_visual_kind(slot, query)
     score = 18
-    if kind in {'flow', 'causal', 'compare', 'layered', 'network', 'timeline', 'kpi', 'matrix'}:
+    if kind in {'flow', 'causal', 'compare', 'layered', 'network', 'timeline', 'kpi', 'matrix', 'relation'}:
         score += 42
     if len(re.findall(r'\d+(?:\.\d+)?%?', text)) >= 2:
         score += 18
@@ -107,10 +109,10 @@ def visual_fit_score(slot: dict[str, Any], query: str) -> int:
 
 def suggest_body_visual_kind(slot: dict[str, Any], query: str) -> str:
     explicit = str(slot.get('visualType') or '').strip().lower()
-    allowed = {'flow', 'causal', 'compare', 'layered', 'network', 'timeline', 'kpi', 'matrix', 'concept'}
+    allowed = {'flow', 'causal', 'compare', 'layered', 'network', 'timeline', 'kpi', 'matrix', 'relation', 'concept'}
     if explicit in allowed:
         return explicit
-    text = ' '.join(str(slot.get(k) or '') for k in ('afterHeading', 'anchorText', 'purpose', 'query'))
+    text = ' '.join(str(slot.get(k) or '') for k in ('afterHeading', 'anchorText', 'contextText', 'purpose', 'query'))
     digits = re.findall(r'\d+(?:\.\d+)?%?', text)
     if len(digits) >= 2 and any(k in text for k in ('个', '项', '条', '倍', '%', '个月', '年', '场景', '赛道', '增长', '下降', '提升')):
         return 'kpi'
@@ -121,7 +123,8 @@ def suggest_body_visual_kind(slot: dict[str, Any], query: str) -> str:
     if any(k in text for k in _ANALYTIC_TERMS['network']): return 'network'
     if any(k in text for k in _ANALYTIC_TERMS['layered']): return 'layered'
     if any(k in text for k in _ANALYTIC_TERMS['flow']): return 'flow'
-    if any(k in text for k in ('分析', '机制', '逻辑', '关系', '框架', '价值')): return 'flow'
+    if any(k in text for k in ('相互作用', '依赖', '连接', '关系', '协作', '传导', '带动', '支撑')): return 'relation'
+    if any(k in text for k in ('分析', '机制', '逻辑', '框架', '价值')): return 'flow'
     return 'concept'
 
 
@@ -130,6 +133,8 @@ def should_generate_visual(slot: dict[str, Any], query: str, *, strict: bool = F
 
 
 def build_body_visual(slot: dict[str, Any], query: str) -> dict[str, Any]:
+    if not code_visuals_available():
+        raise RuntimeError('本地代码视觉缺少中文字体，请安装 Noto CJK 字体后重试')
     kind = suggest_body_visual_kind(slot, query)
     # KPI cards are only appropriate when the paragraph/plan contains real numeric
     # evidence.  Never invent display numbers merely to fill a visual template.
@@ -178,6 +183,11 @@ def _font(size: int, *, bold: bool = False, serif: bool = False):
             try: return ImageFont.truetype(str(path), size=size, **kwargs)
             except Exception: pass
     return ImageFont.load_default()
+
+
+def code_visuals_available() -> bool:
+    """True only when a real CJK font is available; never render tofu as art."""
+    return _discover_font("regular") is not None and _discover_font("bold") is not None
 
 
 def _to_data_uri(img: Image.Image) -> str:
@@ -259,7 +269,7 @@ def _body_base(title: str, tag: str, subtitle: str=''):
 
 
 def _palette(slot):
-    text=' '.join(str(slot.get(k) or '') for k in ('afterHeading','anchorText','purpose','query'))
+    text=' '.join(str(slot.get(k) or '') for k in ('afterHeading','anchorText','contextText','purpose','query'))
     if any(k in text for k in ('安全','合规','隐私','个人信息')): return _THEME_PALETTES['security']
     if any(k in text for k in ('人工智能','大模型','AI','算法','模型','语料','训练数据')): return _THEME_PALETTES['ai']
     if any(k in text for k in ('公共数据','政务','政府','城市')): return _THEME_PALETTES['public']
@@ -292,7 +302,7 @@ def _plan_list(slot,*keys,max_items=6,label_limit=14):
 
 
 def _content_clauses(slot,max_items=6,label_limit=14):
-    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','purpose','afterHeading'))
+    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','afterHeading'))
     clauses=[_clean_label(x,label_limit) for x in re.split(r'[，。；：！？、]|(?:并且|以及|同时|进而|从而)',text) if len(re.sub(r'\s+','',x))>=4]
     out=[]
     for x in clauses:
@@ -306,7 +316,7 @@ def _title(slot,fallback): return str(_plan(slot).get('title') or slot.get('afte
 def _flow_nodes(slot):
     rows=_plan_list(slot,'nodes','steps','items',max_items=6,label_limit=12)
     if len(rows)>=3: return rows
-    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','purpose','query'))
+    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','query'))
     if '资产' in text: return ['原始数据','质量治理','权属确认','资产登记','数据产品','经营应用']
     if any(k in text for k in ('研发','科研','实验')): return ['历史数据','标准整理','模型分析','候选筛选','小步验证','结果回流']
     if '公共数据' in text: return ['公共数据','目录开放','授权使用','场景开发','服务应用','效果反馈']
@@ -320,7 +330,7 @@ def _causal_nodes(slot):
     if len(rows)>=3: return rows
     clauses=_content_clauses(slot,max_items=4,label_limit=12)
     if len(clauses)>=3: return clauses
-    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','purpose','query'))
+    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','query'))
     if '治理' in text: return ['口径不一','责任不清','数据孤岛','质量失控']
     return ['信息不完整','边界不清晰','过程难追踪','反馈不及时']
 
@@ -334,7 +344,7 @@ def _metric_pairs(slot):
                 value=_clean_label(item.get('value') or item.get('number'),9); label=_clean_label(item.get('label') or item.get('name'),13)
                 if value: out.append((value,label or '关键指标'))
     if out: return out
-    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','purpose','query'))
+    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','query'))
     pat=re.compile(r'(?P<num>\d+(?:\.\d+)?(?:%|倍|个月|年|条|项|个|家|亿元|万元)?)')
     for m in pat.finditer(text):
         value=m.group('num'); start=max(0,m.start()-12); end=min(len(text),m.end()+15); context=_clean_label(text[start:end].replace(value,''),14)
@@ -478,7 +488,7 @@ def _cover_scene(title,brief):
 
 
 def _build_body(kind,slot,query):
-    return {'flow':_body_flow,'causal':_body_causal,'compare':_body_compare,'layered':_body_layered,'network':_body_network,'timeline':_body_timeline,'kpi':_body_kpi,'matrix':_body_matrix}.get(kind,_body_concept)(slot)
+    return {'flow':_body_flow,'causal':_body_causal,'compare':_body_compare,'layered':_body_layered,'network':_body_network,'timeline':_body_timeline,'kpi':_body_kpi,'matrix':_body_matrix,'relation':_body_relation}.get(kind,_body_concept)(slot)
 
 
 def _body_flow(slot):
@@ -514,7 +524,7 @@ def _body_compare(slot):
 def _body_layered(slot):
     plan=_plan(slot); title=_title(slot,'数据价值层级'); img,d=_body_base(_clean_label(title,30),'LAYERS','越往上越接近业务价值，越往下越依赖稳定底座'); colors=_palette(slot); labels=_plan_list(slot,'layers','nodes','items',max_items=4,label_limit=14)
     if len(labels)<3:
-        text=' '.join(str(slot.get(k) or '') for k in ('anchorText','purpose','query'))
+        text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','query'))
         labels=['经营应用层','数据产品层','资产治理层','数据资源层'] if '资产' in text else (['模型应用层','数据产品层','质量安全层','数据资源层'] if ('AI' in text or '模型' in text) else ['业务应用层','数据产品层','治理能力层','数据资源层'])
     widths=[920,1030,1140,1250]; y=290; subs=_plan_list(slot,'subtitles',max_items=4,label_limit=22)
     for i,name in enumerate(labels[:4]):
@@ -537,7 +547,7 @@ def _body_timeline(slot):
         for item in raw[:4]:
             if isinstance(item,dict): events.append((_clean_label(item.get('time') or item.get('date'),8),_clean_label(item.get('label') or item.get('title'),12)))
             else: events.append(('',_clean_label(item,12)))
-    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','purpose','query'))
+    text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','query'))
     if not events:
         dates=re.findall(r'(20\d{2}(?:[./年-]\d{1,2}(?:[./月-]\d{1,2}日?)?)?)',text); clauses=_content_clauses(slot,max_items=4,label_limit=12)
         for i in range(min(4,max(len(dates),len(clauses)))): events.append((dates[i] if i<len(dates) else f'阶段{i+1}',clauses[i] if i<len(clauses) else f'关键节点{i+1}'))
@@ -567,6 +577,81 @@ def _body_matrix(slot):
     items=_plan_list(slot,'items','nodes',max_items=4,label_limit=12)
     for i,lab in enumerate(items[:4]):
         pts=[(560,660),(1080,660),(600,430),(1110,430)]; x,y=pts[i]; c=colors[i%len(colors)]; d.ellipse((x-12,y-12,x+12,y+12),fill=_hex(c)); d.text((x+22,y-17),lab,font=_font(22,bold=True),fill=_hex('#263247'))
+    return img
+
+
+def _edge_rows(slot):
+    raw = _plan(slot).get('edges')
+    out = []
+    if isinstance(raw, list):
+        for item in raw[:8]:
+            if not isinstance(item, dict):
+                continue
+            a = _clean_label(item.get('from'), 12); b = _clean_label(item.get('to'), 12); label = _clean_label(item.get('label'), 12)
+            if a and b:
+                out.append((a, b, label))
+    return out
+
+
+def _body_relation(slot):
+    plan = _plan(slot); title = _title(slot, '关键关系')
+    img, d = _body_base(_clean_label(title, 30), 'RELATION', '把主体、动作和方向画清楚，避免只有装饰没有关系')
+    colors = _palette(slot)
+    edges = _edge_rows(slot)
+    nodes = _plan_list(slot, 'nodes', 'entities', 'actors', 'items', max_items=6, label_limit=12)
+    if edges:
+        for a, b, _ in edges:
+            if a not in nodes: nodes.append(a)
+            if b not in nodes: nodes.append(b)
+    if len(nodes) < 3:
+        nodes = _content_clauses(slot, max_items=5, label_limit=12)
+    if len(nodes) < 3:
+        nodes = ['数据输入', '治理规则', '业务使用', '结果反馈']
+    nodes = nodes[:6]
+    # Balanced ring with a quiet central field. Positions are deterministic and
+    # leave enough whitespace for edge labels.
+    cx, cy = 800, 515; radius_x, radius_y = 500, 245
+    positions = {}
+    for i, lab in enumerate(nodes):
+        angle = -math.pi/2 + 2*math.pi*i/max(1, len(nodes))
+        positions[lab] = (int(cx + radius_x*math.cos(angle)), int(cy + radius_y*math.sin(angle)))
+    if not edges:
+        edges = [(nodes[i], nodes[i+1], '') for i in range(len(nodes)-1)]
+    else:
+        # A planner can occasionally mention six nodes but only connect two. Fill
+        # disconnected nodes with conservative sequence edges so the visual never
+        # looks like a collection of unrelated cards. Existing model-authored
+        # relationships remain untouched and always render first.
+        connected = {x for a, b, _ in edges for x in (a, b)}
+        for i, node in enumerate(nodes):
+            if node in connected:
+                continue
+            anchor = nodes[max(0, i-1)] if i else nodes[min(1, len(nodes)-1)]
+            if anchor != node:
+                edges.append((anchor, node, '关联'))
+                connected.update((anchor, node))
+            if len(edges) >= 8:
+                break
+    for idx, (a, b, label) in enumerate(edges[:8]):
+        if a not in positions or b not in positions: continue
+        x1, y1 = positions[a]; x2, y2 = positions[b]
+        vx, vy = x2-x1, y2-y1; dist=max(1, math.hypot(vx,vy)); ux,uy=vx/dist,vy/dist
+        p1=(int(x1+ux*125),int(y1+uy*48)); p2=(int(x2-ux*125),int(y2-uy*48))
+        _arrow(d,p1,p2,colors[idx % len(colors)],4)
+        if label:
+            mx,my=(p1[0]+p2[0])//2,(p1[1]+p2[1])//2
+            tw=d.textlength(label,font=_font(19,bold=True));
+            d.rounded_rectangle((mx-tw/2-10,my-17,mx+tw/2+10,my+17),radius=10,fill=(247,249,253,235))
+            d.text((mx-tw/2,my-12),label,font=_font(19,bold=True),fill=_hex('#5B6880'))
+    for i, lab in enumerate(nodes):
+        x,y=positions[lab]; c=colors[i % len(colors)]
+        _shadow_card(img,(x-125,y-48,x+125,y+48),22,(255,255,255,252),(20,35,65,20)); d=ImageDraw.Draw(img)
+        d.rounded_rectangle((x-112,y-30,x-76,y+6),radius=10,fill=_hex(c))
+        _fit_text(d,lab,(x-58,y-25,x+108,y+26),27,19,fill=_hex('#233047'))
+    center = _clean_label(plan.get('center') or plan.get('relation'), 12)
+    if center:
+        d.rounded_rectangle((690,468,910,562),radius=28,fill=_hex('#17243A'))
+        _fit_text(d,center,(715,490,885,545),28,20,fill=(255,255,255),center=True)
     return img
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline quality/efficiency guard for V31.
+"""Offline quality/efficiency guard for V32.
 
 No external API keys or network calls are used. It checks the local semantic gate,
 provider-call budgets, prompt size proxy, source-first image behavior, and hybrid code-visual routing so future
