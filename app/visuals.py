@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from . import serper_images
 from .image_fetch import ImageProfile, image_profile
-from .cover_art import build_cover_data_uri
+from .code_visuals import build_body_visual, build_cover_data_uri, visual_fit_score
 from .source_page_images import discover_source_images
 
 
@@ -118,28 +118,58 @@ _VISUAL_INTENT_ROUTES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 
+def _direct_diagram_decision(slot: dict[str, Any], query: str, strategy: str) -> bool:
+    """Whether this body slot should be drawn before web-image search.
+
+    Concrete source-bound events retain provenance priority in smart mode.
+    Structural/numerical explanation can skip Serper entirely.
+    """
+    if slot.get("kind") != "body":
+        return False
+    if strategy == "all_diagram":
+        return True
+    if strategy in {"real_first", "real_only"}:
+        return False
+    intent = str(slot.get("visualIntent") or "auto").strip().lower()
+    if intent == "real":
+        return False
+    if intent == "diagram":
+        return True
+    has_source = bool(str(slot.get("sourceHintUrl") or "").strip()) or bool(slot.get("sourceId"))
+    fit = visual_fit_score(slot, query)
+    if strategy == "diagram_first":
+        return fit >= (72 if has_source else 48)
+    return (not has_source) and fit >= 72
+
+
 def resolve_visuals(
-    slots: list[dict[str, str]], query: str, *, preference: str = "",
+    slots: list[dict[str, str]], query: str, *, preference: str = "", strategy: str = "smart",
     match_mode: str = "precise", source_policy: str = "balanced",
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Resolve article images exclusively through Serper / Google Images.
+    """Resolve visuals through source-page, web-image and local drawing lanes.
 
-    Tavily remains responsible for news and policy retrieval, but it is no
-    longer used for article images. Serper supplies the image result, original
-    URL, thumbnail and source page; this module then performs semantic ranking,
-    download probing, source diversification and visual de-duplication.
+    `smart` keeps concrete news/cases real-first while allowing structural,
+    numerical and mechanism-heavy paragraphs to draw immediately. Mixed modes
+    fall back to a local explanation graphic instead of accepting weak stock art.
     """
     warnings: list[str] = []
     if not slots:
         return [], warnings
+    strategy = str(strategy or "smart").strip().lower()
+    if strategy not in {"smart", "real_first", "diagram_first", "all_diagram", "real_only"}:
+        strategy = "smart"
+    direct_diagram_ids = {
+        str(slot.get("slotId") or "") for slot in slots
+        if slot.get("kind") == "body" and _direct_diagram_decision(slot, query, strategy)
+    }
     serper_ready = serper_images.available()
     has_origin_images = any(
-        slot.get("kind") == "body" and (slot.get("sourceImages") or [])
+        slot.get("kind") == "body" and str(slot.get("slotId") or "") not in direct_diagram_ids and (slot.get("sourceImages") or [])
         and not _is_root_like_url(str(slot.get("sourceHintUrl") or ""))
         for slot in slots
     )
     has_source_pages = any(
-        slot.get("kind") == "body" and str(slot.get("sourceHintUrl") or "").startswith(("http://", "https://"))
+        slot.get("kind") == "body" and str(slot.get("slotId") or "") not in direct_diagram_ids and str(slot.get("sourceHintUrl") or "").startswith(("http://", "https://"))
         and not _is_root_like_url(str(slot.get("sourceHintUrl") or ""))
         for slot in slots
     )
@@ -147,9 +177,20 @@ def resolve_visuals(
     # early merely because Tavily omitted sourceImages or Serper is unavailable:
     # OpenGraph/JSON-LD/srcset discovery can still recover the real article image.
     if not serper_ready and not has_origin_images and not has_source_pages:
-        cover_slot = next((slot for slot in slots if slot.get("kind") == "cover"), None)
-        visuals = [_generated_cover_visual(cover_slot, query)] if cover_slot else []
-        return visuals, ["未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图：正文实时配图未执行；封面仍正常生成。"]
+        visuals: list[dict[str, Any]] = []
+        for slot in slots:
+            if slot.get("kind") == "cover":
+                visuals.append(_generated_cover_visual(slot, query))
+            elif strategy == "real_only":
+                visuals.append({**slot, "image": None, "matchedBy": "unresolved-real-only"})
+            else:
+                visuals.append(_generated_body_visual(slot, query, reason="no-web-image-config"))
+        message = (
+            "未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图：按当前配图策略已改用代码绘图补齐正文。"
+            if strategy != "real_only" else
+            "未配置 SERPER_API_KEY，且当前没有可读取的来源页/来源原图；当前选择仅真实图片，因此正文图片位保持为空。"
+        )
+        return visuals, [message]
 
     results_by_slot: dict[str, list[dict[str, Any]]] = {slot["slotId"]: [] for slot in slots}
     queries_by_slot: dict[str, set[str]] = {slot["slotId"]: set() for slot in slots}
@@ -157,7 +198,7 @@ def resolve_visuals(
     # during article generation, so their real images can be reused here without
     # another search request. Serper remains a fallback/augmentation lane.
     for slot in slots:
-        if slot.get("kind") != "body":
+        if slot.get("kind") != "body" or str(slot.get("slotId") or "") in direct_diagram_ids:
             continue
         source_title = str(slot.get("sourceHint") or "").strip()
         source_name = str(slot.get("sourceName") or "").strip()
@@ -194,7 +235,7 @@ def resolve_visuals(
     max_workers = min(10, max(4, len(slots) * 2))
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="visual-search") as pool:
         for slot in slots:
-            if slot.get("kind") == "cover":
+            if slot.get("kind") == "cover" or str(slot.get("slotId") or "") in direct_diagram_ids:
                 continue
             source_url = str(slot.get("sourceHintUrl") or "").strip()
             # Tavily already supplied concrete source-page images: probe those
@@ -350,6 +391,9 @@ def resolve_visuals(
         if slot.get("kind") == "cover":
             resolved[slot["slotId"]] = _generated_cover_visual(slot, query)
             continue
+        if str(slot.get("slotId") or "") in direct_diagram_ids:
+            resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason=f"{strategy}-direct")
+            continue
         picked, profile = pick_candidate(slot, mode=match_mode)
         if picked:
             commit(slot, picked, profile)
@@ -422,11 +466,15 @@ def resolve_visuals(
         if picked:
             commit(slot, picked, profile, fallback=True)
             continue
+        if strategy != "real_only":
+            resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason="search-fallback")
+            warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到足够可靠的真实图片，已自动改为系统绘制示意图，避免拿无关图片凑数。")
+            continue
         if serper_ready:
-            warnings.append(f"“{slot.get('afterHeading') or '正文'}”没有找到通过来源原图/语义/可下载性检查的正文图片；已尝试源页面、主题化检索和补充检索，该位置留空，不用无关图片凑数。")
+            warnings.append(f"“{slot.get('afterHeading') or '正文'}”没有找到通过来源原图/语义/可下载性检查的正文图片；当前选择仅真实图片，该位置留空。")
         else:
-            warnings.append(f"“{slot.get('afterHeading') or '正文'}”的来源页原图均未通过可下载性或语义检查，且未配置 SERPER_API_KEY；该位置留空。")
-        resolved[slot["slotId"]] = {**slot, "image": None, "matchedBy": "unresolved"}
+            warnings.append(f"“{slot.get('afterHeading') or '正文'}”的来源页原图均未通过检查，且未配置 SERPER_API_KEY；当前选择仅真实图片，该位置留空。")
+        resolved[slot["slotId"]] = {**slot, "image": None, "matchedBy": "unresolved-real-only"}
 
     visuals = [resolved.get(slot["slotId"], {**slot, "image": None, "matchedBy": "unresolved"}) for slot in slots]
     return visuals, _dedupe_warnings(warnings)
@@ -902,13 +950,21 @@ def _generated_cover_visual(slot: dict[str, str] | None, query: str) -> dict[str
     slot = dict(slot or {"slotId": "cover", "kind": "cover", "afterHeading": "", "purpose": "文章封面视觉", "query": query})
     title = str(slot.get("coverTitle") or slot.get("query") or query).strip()
     brief = str(slot.get("coverBrief") or slot.get("purpose") or "").strip()
-    uri = build_cover_data_uri(title, brief)
+    uri = build_cover_data_uri(title, brief, query)
     image = {
         "url": uri, "description": title, "source": "系统生成封面", "sourceUrl": "",
         "sourceTitle": title, "sourceSnippet": brief, "provider": "generated-cover",
         "width": 1600, "height": 900, "matchScore": 100.0,
     }
     return {**slot, "image": image, "matchedBy": "generated-cover-title-bound"}
+
+
+
+def _generated_body_visual(slot: dict[str, Any], query: str, *, reason: str) -> dict[str, Any]:
+    slot = dict(slot)
+    image = build_body_visual(slot, query)
+    image["generationReason"] = reason
+    return {**slot, "image": image, "matchedBy": f"generated-diagram-{reason}"}
 
 def _profile_bonus(profile: ImageProfile | None) -> float:
     if profile is None:

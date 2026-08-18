@@ -96,7 +96,12 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
             source_id = str(max(0, int(raw.get("sourceId") or 0)))
         except (TypeError, ValueError):
             source_id = "0"
-        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": matched, "anchorText": anchor_text, "anchorBlockIndex": anchor_index, "purpose": str(raw.get("purpose") or "解释本节核心信息")[:160], "query": slot_query or f"{query} {matched} {anchor_text[:70]}", "sourceId": source_id if source_id != "0" else "", "placement": "heading"})
+        visual_intent = str(raw.get("visualIntent") or "auto").strip().lower()
+        if visual_intent not in {"auto", "real", "diagram"}:
+            visual_intent = "auto"
+        visual_type = str(raw.get("visualType") or "").strip().lower()
+        visual_plan = raw.get("visualPlan") if isinstance(raw.get("visualPlan"), dict) else {}
+        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": matched, "anchorText": anchor_text, "anchorBlockIndex": anchor_index, "purpose": str(raw.get("purpose") or "解释本节核心信息")[:160], "query": slot_query or f"{query} {matched} {anchor_text[:70]}", "sourceId": source_id if source_id != "0" else "", "placement": "heading", "visualIntent": visual_intent, "visualType": visual_type, "visualPlan": visual_plan})
 
     candidates: list[dict[str, str]] = []
     current_heading = ""
@@ -125,7 +130,7 @@ def plan_visual_slots(article: dict[str, Any], query: str, *, max_body: int = 3)
         model_query = image_queries[query_cursor] if query_cursor < len(image_queries) else ""
         query_cursor += 1
         slot_query = " ".join(x for x in [query, c["heading"], c["anchorText"][:90], model_query] if x)[:220]
-        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": c["heading"], "anchorText": c["anchorText"], "anchorBlockIndex": c["blockIndex"], "purpose": "与该段核心信息直接相关的真实场景图", "query": slot_query, "placement": "paragraph"})
+        slots.append({"slotId": f"body-{len(slots)}", "kind": "body", "afterHeading": c["heading"], "anchorText": c["anchorText"], "anchorBlockIndex": c["blockIndex"], "purpose": "与该段核心信息直接相关的视觉解释", "query": slot_query, "placement": "paragraph", "visualIntent": "auto", "visualType": "", "visualPlan": {}})
     return slots[:max_body+1]
 
 

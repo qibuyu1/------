@@ -27,7 +27,7 @@ WEB_ROOT = ROOT / "web"
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DataElementGovernance/22.0"
+    server_version = "DataElementGovernance/30.0"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
@@ -38,11 +38,12 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "service": "数据要素治理",
-                    "version": "22.0",
+                    "version": "30.0",
                     "tavilyConfigured": tavily_available(),
                     "deepseekConfigured": deepseek_available(),
                     "deepseekModel": settings.deepseek_model if deepseek_available() else None,
                     "serperImagesConfigured": serper_images_available(),
+                    "codeVisualsAvailable": True,
                     "serperSearchFallbackConfigured": bool(settings.serper_api_key),
                     "imageSearchProvider": "serper" if serper_images_available() else None,
                     "strictSources": True,
@@ -266,11 +267,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((settings.host, settings.port), Handler)
-    print("\n数据要素治理 V22.0")
+    print("\n数据要素治理 V30.0")
     print(f"  http://{settings.host}:{settings.port}")
     print(f"  Tavily: {'configured' if tavily_available() else 'NOT CONFIGURED'}")
     print(f"  DeepSeek: {settings.deepseek_model if deepseek_available() else 'NOT CONFIGURED (generation disabled)'}")
-    print(f"  Image Search: {'Serper / Google Images' if serper_images_available() else 'NOT CONFIGURED'}")
+    print(f"  Image System: local code visuals + {'Serper / Google Images' if serper_images_available() else 'no Serper'}")
     print("  Upload: TXT / MD / CSV / JSON / HTML / DOCX / PDF")
     print("  Export: Word / PDF · revision history enabled")
     print("  Search: Tavily primary · compact multi-query · semantic family match · optional Serper fallback")

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Offline quality/efficiency guard for V26.
+"""Offline quality/efficiency guard for V30.
 
 No external API keys or network calls are used. It checks the local semantic gate,
-provider-call budgets, prompt size proxy, and source-first image behavior so future
+provider-call budgets, prompt size proxy, source-first image behavior, and hybrid code-visual routing so future
 changes can be compared without spending Tavily/Serper/DeepSeek quota.
 """
 from __future__ import annotations
@@ -143,6 +143,41 @@ def image_budget() -> dict:
     return {"noSourceInitialCalls": len(no_source_calls), "sourcePageInitialCalls": len(source_calls)}
 
 
+def hybrid_visual_routing_budget() -> dict:
+    base = {
+        "slotId": "body-1", "kind": "body", "query": "数据治理 机制",
+        "afterHeading": "数据如何进入经营",
+        "anchorText": "原始数据经过标准、质量与权属治理，形成数据产品并进入业务决策。",
+        "purpose": "解释数据从治理到业务价值的链路",
+    }
+
+    smart_calls = []
+    smart_slot = {**base, "visualIntent": "diagram", "visualType": "flow", "visualPlan": {"nodes": ["原始数据", "标准治理", "数据产品", "业务应用"]}}
+    with patch.object(serper_images, "available", return_value=True), \
+         patch.object(serper_images, "search_images", side_effect=lambda q, count=18: smart_calls.append(q) or []):
+        smart_out, _ = visuals.resolve_visuals([smart_slot], "数据治理", strategy="smart")
+
+    all_calls = []
+    with patch.object(serper_images, "available", return_value=True), \
+         patch.object(serper_images, "search_images", side_effect=lambda q, count=18: all_calls.append(q) or []):
+        all_out, _ = visuals.resolve_visuals([base], "数据治理", strategy="all_diagram")
+
+    real_calls = []
+    real_slot = {**base, "visualIntent": "real"}
+    with patch.object(serper_images, "available", return_value=True), \
+         patch.object(serper_images, "search_images", side_effect=lambda q, count=18: real_calls.append(q) or []):
+        real_out, _ = visuals.resolve_visuals([real_slot], "数据治理", strategy="real_first")
+
+    return {
+        "smartSerperCalls": len(smart_calls),
+        "smartProvider": (smart_out[0].get("image") or {}).get("provider"),
+        "allDiagramSerperCalls": len(all_calls),
+        "allDiagramProvider": (all_out[0].get("image") or {}).get("provider"),
+        "realFirstSerperCalls": len(real_calls),
+        "realFirstFallbackProvider": (real_out[0].get("image") or {}).get("provider"),
+    }
+
+
 def prompt_proxy() -> dict:
     raw = (
         "国家数据局发布政策，提出加强关键数据技术攻关。"
@@ -179,6 +214,7 @@ def main() -> None:
         "tavilyPrimary": tavily_primary_budget(),
         "serperFallback": serper_budget(),
         "images": image_budget(),
+        "hybridVisuals": hybrid_visual_routing_budget(),
         "draftPromptProxy": prompt_proxy(),
     }
     checks = [
@@ -187,6 +223,12 @@ def main() -> None:
         report["serperFallback"]["calls"] <= 3,
         report["images"]["noSourceInitialCalls"] <= 1,
         report["images"]["sourcePageInitialCalls"] == 0,
+        report["hybridVisuals"]["smartSerperCalls"] == 0,
+        report["hybridVisuals"]["smartProvider"] == "generated-diagram",
+        report["hybridVisuals"]["allDiagramSerperCalls"] == 0,
+        report["hybridVisuals"]["allDiagramProvider"] == "generated-diagram",
+        report["hybridVisuals"]["realFirstSerperCalls"] <= 2,
+        report["hybridVisuals"]["realFirstFallbackProvider"] == "generated-diagram",
         report["draftPromptProxy"]["totalPromptChars"] < 16000,
     ]
     report["passed"] = all(checks)

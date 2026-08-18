@@ -1,4 +1,4 @@
-# 数据要素治理 · V29 架构说明
+# 数据要素治理 · V30 架构说明
 
 ## 1. 交互式检索：短 Query、多路召回、国内优先
 
@@ -67,17 +67,38 @@ Serper 不是无条件混用，而是两处按需补充：
 
 修改支持句子、段落、章节和整篇范围，并保留撤回与恢复初稿历史。
 
-## 8. 图片：来源页元图 + 小节语义路线 + 条件补搜
+## 8. 图片：真实来源 + Serper + 本地代码视觉三路智能路由
 
-`article/sourceList -> visual slots -> source images / source-page metadata -> compact semantic query -> Serper / Google Images -> semantic + download filter -> embed`
+`article/imageSlots -> routing decision -> source-page images | Serper | trusted local renderer -> visual gate -> embed`
 
-当章节引用了具体新闻、政策或案例时，V27 会并行使用两类零搜索成本的来源图：Tavily Extract 已返回的页面图片，以及直接从来源页 OpenGraph / Twitter / JSON-LD / 正文大图元数据发现的候选；两者都要继续经过尺寸、可下载性、重复度和语义检查。
+V30 不再把“所有图片都去网上搜”作为唯一方案。每个正文图片位会保留 `visualIntent / visualType / visualPlan`，但这些字段只描述**想解释什么**，不包含可执行代码。后端 `app/code_visuals.py` 是唯一像素执行器。
 
-没有可靠源图时，图片 Query 不再统一追加“科技研发”。系统根据当前小节含义选择视觉路线，例如“数据治理失败”映射到数据孤岛/数据质量/数据标准，“影响普通人”映射到个人信息保护/隐私/数字政务，研发、业务、安全、公共数据、资产化、可信数据空间等分别有独立路线。自然语言小标题与长段落只用于理解，不整句发送给图片搜索。
+### 8.1 智能默认
 
-正文图片保持 V26 的快速路径：无源图先发 1 条高信息 Query；只有该位置没有可用图片时才补第 2 条不同 Query。所有缺图位的补搜与下载探测并行执行，因此提升召回不依赖串行等待。图片仍过滤 logo、头像、模板图、低尺寸、重复、失效以及笔记本/显卡/CPU 等与数据主题无关的泛科技干扰图。
+- 具体新闻、政策发布、机构活动、企业项目：优先绑定 `sourceId`，先用 Tavily Extract 已得到的来源页图，再直接解析来源页 OpenGraph / JSON-LD / srcset / 正文大图。
+- 无可靠来源原图且内容适合现实照片：使用 Serper / Google Images 的短 Query，继续经过 V29 的段落语义、二维码、logo、尺寸、可下载性和去重门禁。
+- 流程、因果、对比、分层、生态网络、时间线、真实数字、价值/风险矩阵等结构化段落：根据本地 `visual_fit_score` 可直接走代码视觉，跳过 Serper。
+- 智能混合/真实优先中，真实图片路线最终没有可靠候选时，以代码解释图兜底。`real_only` 是唯一允许“宁缺毋滥、保持为空”的策略。
 
-是否具备转载权仍需发布者依据来源授权和平台规则判断；系统只负责检索、来源标注和技术嵌入。
+### 8.2 五种策略
+
+`smart | real_first | diagram_first | all_diagram | real_only`
+
+`all_diagram` 正文图片完全不调用 Serper；这使未配置图片 API 的部署仍可生成完整图文稿。`real_first` 保留新闻感；`diagram_first` 更适合研究/分析文章；`real_only` 保持纯真实图片工作流。
+
+### 8.3 本地视觉 Renderer
+
+`visual DSL -> sanitize -> theme / composition / content extraction -> Pillow renderer -> PNG data URI`
+
+支持封面多视觉方向和正文 `flow / causal / compare / layered / network / timeline / kpi / matrix / concept`。色板根据治理、AI、安全、公共数据、数据资产、研发、产业等语义切换；内容节点尽量从 `visualPlan` 和相邻正文提取。KPI 没有真实数字时退回 concept，绝不为了版式填充虚构指标。
+
+Renderer 自动发现 Linux / Windows / macOS 常见 CJK 字体，也允许用 `DEG_VISUAL_FONT*` 环境变量覆盖；项目不打包字体。
+
+### 8.4 成本守恒
+
+视觉规划跟随现有 DeepSeek 文章 JSON 返回，不新增一次 LLM 调用。代码绘图只使用本地 CPU。离线基准保持：Tavily 主链 5、Serper 搜索兜底最多 3、无来源正文图初始图片搜索最多 1、有来源页图片初始图片搜索 0；结构图/全部代码绘图可直接把 Serper Images 降为 0。
+
+是否具备真实网络图片的转载权仍需发布者依据来源授权和平台规则判断；系统负责检索、来源标注和技术嵌入。代码图会明确标为“系统根据本文内容绘制”。
 
 ## 9. 普通文章渲染与多格式导出
 
@@ -222,3 +243,8 @@ PDF 主路径不再维护一套与 Word 分离的视觉参数；DOCX 和 PDF 共
 
 因此 V29 主要减少错误候选，而不是靠增加搜索次数补救；现有 provider 调用上限保持不变。
 
+
+
+## V30 智能混合视觉补充
+
+V29 的精度门禁是 V30 的真实图片底座，不被代码绘图绕过。代码图只在路由层被选择或真实候选失败后产生，因此不会为了提高“图片数量”而重新放宽二维码、泛科技图或段落语义规则。前端 `visualReport` 同时展示 `realPlaced / generatedDiagram / strategy`，便于自查本篇到底用了多少真实图与多少代码图。

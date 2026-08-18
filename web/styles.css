@@ -320,3 +320,8 @@ textarea,input,select{outline:none}
 .understanding-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.understanding-grid span{padding:9px 10px;border:1px solid #d9e8f5;border-radius:10px;background:#f5faff;color:#45647e;font-size:11px;line-height:1.5}.understanding-grid b{display:block;margin-bottom:2px;color:#173a5e;font-size:9px;letter-spacing:.04em}@media(max-width:760px){.understanding-grid{grid-template-columns:1fr}}
 
 @media(max-width:720px){.visual-audit-content{grid-template-columns:1fr}.visual-audit-thumb{width:100%;height:auto;max-height:220px}}
+
+/* V30: smart image routing / code visual strategy help */
+.select-help{display:block;margin-top:6px;color:var(--muted);font-size:8px;line-height:1.5;font-weight:400}
+.form-grid label:has(select:disabled){opacity:.58}
+.form-grid select:disabled{cursor:not-allowed;background:#f3f6fa;color:#8190a3}

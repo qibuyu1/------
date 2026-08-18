@@ -530,7 +530,7 @@ class V25ComposeLayoutAndImageTests(unittest.TestCase):
         self.assertEqual(len(calls), len(set(calls)))
         self.assertTrue(any("数据 科技" in q or "数据平台" in q for q in calls[1:]))
 
-    def test_unresolved_body_image_slot_still_appears_in_visual_audit(self):
+    def test_unresolved_real_search_now_falls_back_to_code_visual(self):
         from app import visuals, serper_images
         slot = {
             "slotId": "body-1", "kind": "body", "query": "数据技术突破",
@@ -540,8 +540,8 @@ class V25ComposeLayoutAndImageTests(unittest.TestCase):
         with patch.object(serper_images, "available", return_value=True), patch.object(serper_images, "search_images", return_value=[]):
             out, warnings = visuals.resolve_visuals([slot], "数据技术突破")
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["matchedBy"], "unresolved")
-        self.assertIsNone(out[0]["image"])
+        self.assertTrue(out[0]["matchedBy"].startswith("generated-diagram"))
+        self.assertEqual(out[0]["image"]["provider"], "generated-diagram")
         self.assertTrue(warnings)
 
 
@@ -1109,3 +1109,123 @@ class V29RootSourceImageSafetyTests(unittest.TestCase):
         self.assertTrue(_is_root_like_url("https://media.example.cn"))
         self.assertFalse(_is_root_like_url("https://media.example.cn/news/123.html"))
         self.assertFalse(_is_root_like_url("https://media.example.cn/?id=123"))
+
+
+class V30HybridCodeVisualTests(unittest.TestCase):
+    def _slot(self, **extra):
+        slot = {
+            "slotId": "body-1", "kind": "body", "query": "数据治理 机制",
+            "afterHeading": "数据如何进入经营", "anchorText": "原始数据经过标准、质量和权属治理，形成可复用的数据产品，并进入业务决策。",
+            "purpose": "解释数据从治理到业务价值的链路", "visualIntent": "auto",
+        }
+        slot.update(extra)
+        return slot
+
+    def test_all_diagram_skips_serper_and_draws_body(self):
+        from app import visuals, serper_images
+        calls = []
+        with patch.object(serper_images, "available", return_value=True), \
+             patch.object(serper_images, "search_images", side_effect=lambda q, count=18: calls.append(q) or []):
+            out, _ = visuals.resolve_visuals([self._slot()], "数据治理", strategy="all_diagram")
+        self.assertEqual(calls, [])
+        self.assertEqual(out[0]["image"]["provider"], "generated-diagram")
+        self.assertTrue(out[0]["image"]["url"].startswith("data:image/png;base64,"))
+
+    def test_smart_explicit_diagram_draws_before_web_search(self):
+        from app import visuals, serper_images
+        calls = []
+        slot = self._slot(visualIntent="diagram", visualType="flow", visualPlan={"nodes": ["原始数据", "标准治理", "数据产品", "业务应用"]})
+        with patch.object(serper_images, "available", return_value=True), \
+             patch.object(serper_images, "search_images", side_effect=lambda q, count=18: calls.append(q) or []):
+            out, _ = visuals.resolve_visuals([slot], "数据治理", strategy="smart")
+        self.assertEqual(calls, [])
+        self.assertEqual(out[0]["image"]["generatedKind"], "flow")
+
+    def test_real_first_searches_then_draws_when_search_fails(self):
+        from app import visuals, serper_images
+        calls = []
+        slot = self._slot(visualIntent="real")
+        with patch.object(serper_images, "available", return_value=True), \
+             patch.object(serper_images, "search_images", side_effect=lambda q, count=18: calls.append(q) or []):
+            out, _ = visuals.resolve_visuals([slot], "数据治理", strategy="real_first")
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertLessEqual(len(calls), 2)
+        self.assertEqual(out[0]["image"]["provider"], "generated-diagram")
+
+    def test_real_only_never_draws_fallback(self):
+        from app import visuals, serper_images
+        slot = self._slot(visualIntent="real")
+        with patch.object(serper_images, "available", return_value=True), \
+             patch.object(serper_images, "search_images", return_value=[]):
+            out, _ = visuals.resolve_visuals([slot], "数据治理", strategy="real_only")
+        self.assertIsNone(out[0]["image"])
+        self.assertTrue(str(out[0]["matchedBy"]).startswith("unresolved"))
+
+    def test_visual_plan_survives_slot_planning(self):
+        from app.content_blocks import plan_visual_slots
+        article = {
+            "recommendedTitle": "数据如何进入经营",
+            "markdown": "## 数据如何进入经营\n\n原始数据经过标准、质量和权属治理，形成数据产品并进入业务。",
+            "imageSlots": [{
+                "afterHeading": "数据如何进入经营", "purpose": "解释链路", "query": "数据治理 链路",
+                "visualIntent": "diagram", "visualType": "flow", "visualPlan": {"title": "从数据到价值", "nodes": ["原始数据", "标准治理", "数据产品", "业务应用"]},
+            }],
+        }
+        slots = plan_visual_slots(article, "数据治理", max_body=1)
+        body = slots[1]
+        self.assertEqual(body["visualIntent"], "diagram")
+        self.assertEqual(body["visualType"], "flow")
+        self.assertEqual(body["visualPlan"]["nodes"][2], "数据产品")
+
+    def test_image_slot_sanitizer_bounds_visual_dsl(self):
+        from app.pipeline import _sanitize_image_slots
+        rows = _sanitize_image_slots([{
+            "afterHeading": "A" * 300, "visualIntent": "bad", "visualType": "unknown", "sourceId": "7",
+            "visualPlan": {"title": "T" * 200, "nodes": ["N" * 200] * 12, "metrics": [{"value": "42", "label": "条规定", "extra": "x" * 200}] * 8},
+        }])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["visualIntent"], "auto")
+        self.assertEqual(rows[0]["visualType"], "")
+        self.assertEqual(rows[0]["sourceId"], 7)
+        self.assertLessEqual(len(rows[0]["visualPlan"]["title"]), 80)
+        self.assertEqual(len(rows[0]["visualPlan"]["nodes"]), 6)
+        self.assertEqual(len(rows[0]["visualPlan"]["metrics"]), 6)
+
+    def test_cover_style_changes_with_content_not_one_fixed_template(self):
+        from app.code_visuals import choose_cover_style
+        self.assertEqual(choose_cover_style("全国统一数据产权登记工作指引"), "policy")
+        self.assertEqual(choose_cover_style("研发周期从3年缩短到8个月"), "number")
+        self.assertEqual(choose_cover_style("制造企业仓库如何沉淀库存数据"), "scene")
+        self.assertEqual(choose_cover_style("可信数据空间里的多方协同"), "network")
+
+    def test_number_cover_keeps_number_and_unit_semantically_paired(self):
+        from app.code_visuals import _number_focus
+        self.assertEqual(_number_focus("研发周期从3年缩短到8个月"), ("8", "个月"))
+        self.assertEqual(_number_focus("政策共42条，覆盖数据登记全流程"), ("42", "条"))
+
+    def test_kpi_renderer_does_not_require_fabricated_numbers(self):
+        from app.code_visuals import build_body_visual
+        image = build_body_visual(self._slot(visualIntent="diagram", visualType="kpi", visualPlan={"nodes": ["关键结论", "质量边界", "应用条件"]}), "数据治理")
+        self.assertEqual(image["provider"], "generated-diagram")
+        self.assertTrue(image["url"].startswith("data:image/png;base64,"))
+
+    def test_compose_exposes_five_image_strategies(self):
+        html = (ROOT / "web" / "compose.html").read_text(encoding="utf-8")
+        js = (ROOT / "web" / "compose.js").read_text(encoding="utf-8")
+        self.assertIn('id="imageStrategy"', html)
+        for value in ("smart", "real_first", "diagram_first", "all_diagram", "real_only"):
+            self.assertIn(f'value="{value}"', html)
+        self.assertIn('imageStrategy: $("#imageStrategy")?.value || "smart"', js)
+        self.assertIn("syncImageStrategyControls", js)
+
+    def test_local_font_discovery_is_safe(self):
+        from app.code_visuals import _discover_font
+        found = _discover_font("regular")
+        if found is not None:
+            self.assertTrue(found.exists())
+            self.assertTrue(found.is_file())
+
+    def test_server_health_advertises_local_code_visuals(self):
+        text = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn('"codeVisualsAvailable": True', text)
+        self.assertIn('"version": "30.0"', text)

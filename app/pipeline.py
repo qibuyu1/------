@@ -791,6 +791,9 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         image_count = 3
     image_preference = str(options.get("imagePreference") or "混合").strip()[:100]
+    image_strategy = str(options.get("imageStrategy") or "smart").strip().lower()[:30]
+    if image_strategy not in {"smart", "real_first", "diagram_first", "all_diagram", "real_only"}:
+        image_strategy = "smart"
     image_match_mode = str(options.get("imageMatchMode") or "precise").strip()[:30]
     image_source_policy = str(options.get("imageSourcePolicy") or "balanced").strip()[:40]
     quality_mode = str(options.get("qualityMode") or "auto").strip()[:30]
@@ -872,13 +875,17 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
         "smartSections": smart_sections,
         "coverImage": True,
         "bodyImageCount": image_count,
+        "imageStrategy": image_strategy,
+        "imagePreference": image_preference,
+        "imageMatchMode": image_match_mode,
+        "imageSourcePolicy": image_source_policy,
     }
     calls: list[dict[str, Any]] = []
 
     article, meta = _llm_article(
         query, sources, style, audience, length, factual, citations and bool(sources),
         angle=angle, tone=tone, title_mode=title_mode, structure=structure,
-        closing_mode=closing_mode, image_count=image_count, image_preference=image_preference,
+        closing_mode=closing_mode, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy,
         opener=opener, paragraph_rhythm=paragraph_rhythm, evidence_style=evidence_style,
         ai_cliche_guard=ai_cliche_guard, length_spec=length_spec, smart_sections=smart_sections,
         brief_plan=brief_plan,
@@ -940,7 +947,7 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     visual_token = uuid4().hex
     article["visualJobToken"] = visual_token
     article["visualStatus"] = "pending"
-    article["visualReport"] = {"planned": image_count + 1, "coverPlanned": 1, "placed": 0, "coverPlaced": 0, "bodyPlanned": image_count, "bodyPlaced": 0, "provider": "pending", "fallback": 0}
+    article["visualReport"] = {"planned": image_count + 1, "coverPlanned": 1, "placed": 0, "coverPlaced": 0, "bodyPlanned": image_count, "bodyPlaced": 0, "provider": "pending", "fallback": 0, "strategy": image_strategy}
     article["visuals"] = []
     article["coverImage"] = None
     article["images"] = []
@@ -961,11 +968,11 @@ def generate_article(payload: dict[str, Any]) -> dict[str, Any]:
     article["historyDepth"] = 0
     # Persist the id/token before background enrichment so the first UI render can be immediate.
     article_store.update(article_id, article, save_history=False)
-    _start_visual_job(article_id, query=query, image_count=image_count, image_preference=image_preference, image_match_mode=image_match_mode, image_source_policy=image_source_policy, visual_token=visual_token)
+    _start_visual_job(article_id, query=query, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy, visual_token=visual_token)
     return article
 
 
-def _start_visual_job(article_id: str, *, query: str, image_count: int, image_preference: str, image_match_mode: str, image_source_policy: str, visual_token: str) -> None:
+def _start_visual_job(article_id: str, *, query: str, image_count: int, image_preference: str, image_strategy: str = "smart", image_match_mode: str, image_source_policy: str, visual_token: str) -> None:
     def job() -> None:
         try:
             record = article_store.get(article_id)
@@ -974,7 +981,7 @@ def _start_visual_job(article_id: str, *, query: str, image_count: int, image_pr
             current = record.get("article") or {}
             if current.get("visualJobToken") != visual_token:
                 return
-            _apply_visual_layout(current, query, image_count=image_count, image_preference=image_preference, image_match_mode=image_match_mode, image_source_policy=image_source_policy)
+            _apply_visual_layout(current, query, image_count=image_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy)
             current["visualStatus"] = "ready"
             article_store.update(article_id, current, save_history=False)
         except Exception as exc:
@@ -1245,13 +1252,17 @@ def revise_article(payload: dict[str, Any]) -> dict[str, Any]:
         body_count = max(0, int(spec.get("bodyImageCount") or 3))
         revised["visualJobToken"] = uuid4().hex
         revised["visualStatus"] = "pending"
-        revised["visualReport"] = {"planned": body_count + 1, "coverPlanned": 1, "placed": 0, "coverPlaced": 0, "bodyPlanned": body_count, "bodyPlaced": 0, "provider": "pending", "fallback": 0}
+        image_strategy = str(spec.get("imageStrategy") or "smart")
+        image_preference = str(spec.get("imagePreference") or "混合")
+        image_match_mode = str(spec.get("imageMatchMode") or "precise")
+        image_source_policy = str(spec.get("imageSourcePolicy") or "balanced")
+        revised["visualReport"] = {"planned": body_count + 1, "coverPlanned": 1, "placed": 0, "coverPlaced": 0, "bodyPlanned": body_count, "bodyPlaced": 0, "provider": "pending", "fallback": 0, "strategy": image_strategy}
         revised["visuals"] = []
         revised["coverImage"] = None
         revised["images"] = []
         revised["blocks"] = merge_visuals_into_blocks(str(revised.get("markdown") or ""), [])
         article_store.update(article_id, revised, save_history=True)
-        _start_visual_job(article_id, query=query, image_count=body_count, image_preference="混合", image_match_mode="precise", image_source_policy="balanced", visual_token=revised["visualJobToken"])
+        _start_visual_job(article_id, query=query, image_count=body_count, image_preference=image_preference, image_strategy=image_strategy, image_match_mode=image_match_mode, image_source_policy=image_source_policy, visual_token=revised["visualJobToken"])
     else:
         revised["visuals"] = current.get("visuals") or []
         revised["coverImage"] = current.get("coverImage")
@@ -1291,6 +1302,7 @@ def _apply_visual_layout(
     *,
     image_count: int,
     image_preference: str,
+    image_strategy: str = "smart",
     image_source_policy: str = "balanced",
     image_match_mode: str = "precise",
 ) -> None:
@@ -1372,7 +1384,7 @@ def _apply_visual_layout(
         if ranked_hints and ranked_hints[0][0] >= 2:
             bind_source(slot, ranked_hints[0][3])
     visuals, visual_warnings = resolve_visuals(
-        slots, query, preference=image_preference, match_mode=image_match_mode, source_policy=image_source_policy
+        slots, query, preference=image_preference, strategy=image_strategy, match_mode=image_match_mode, source_policy=image_source_policy
     )
     article.setdefault("warnings", []).extend(visual_warnings)
     article["visuals"] = visuals
@@ -1395,10 +1407,12 @@ def _apply_visual_layout(
         "bodyPlaced": sum(1 for v in visuals if v.get("kind") == "body" and v.get("image")),
         "realPlaced": sum(1 for v in visuals if v.get("image") and str((v.get("image") or {}).get("provider") or "") in {"serper", "source-origin", "source-meta"}),
         "providerCounts": provider_counts,
+        "strategy": image_strategy,
         "serper": provider_counts.get("serper", 0),
         "generatedCover": provider_counts.get("generated-cover", 0),
+        "generatedDiagram": provider_counts.get("generated-diagram", 0),
         "fallback": max(0, len(slots) - sum(1 for v in visuals if v.get("image"))),
-        "provider": "serper" if provider_counts.get("serper") else (("source-origin" if provider_counts.get("source-origin") else "source-meta") if (provider_counts.get("source-origin") or provider_counts.get("source-meta")) else ("generated-cover" if provider_counts.get("generated-cover") else "none")),
+        "provider": "serper" if provider_counts.get("serper") else (("source-origin" if provider_counts.get("source-origin") else "source-meta") if (provider_counts.get("source-origin") or provider_counts.get("source-meta")) else (("generated-diagram" if provider_counts.get("generated-diagram") else ("generated-cover" if provider_counts.get("generated-cover") else "none")))),
     }
 
 
@@ -1693,7 +1707,7 @@ def _llm_article(
     query: str, sources: list[dict[str, Any]], style: str, audience: str, length: str,
     factual: bool, citations: bool, *, angle: str = "", tone: str = "理性、清晰",
     title_mode: str = "默认 · 自然起题", structure: str = "默认 · 按内容自然组织",
-    closing_mode: str = "默认 · 自然收束", image_count: int = 3, image_preference: str = "混合",
+    closing_mode: str = "默认 · 自然收束", image_count: int = 3, image_preference: str = "混合", image_strategy: str = "smart",
     opener: str = "默认 · 选择最自然切口", paragraph_rhythm: str = "默认 · 随内容调整",
     evidence_style: str = "默认 · 自然融入证据", ai_cliche_guard: bool = True,
     length_spec: dict[str, int] | None = None, reasoning_effort: str = "low", smart_sections: bool = True,
@@ -1757,7 +1771,7 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
 事实核验：{'开启' if factual else '常规'}
 保留来源编号：{'是' if citations else '否（不要生成引用编号）'}
 最终正文末尾不要自行添加“参考文献 / 参考来源 / 资料来源”章节；来源清单由系统内部管理，只有用户显式开启来源编号时正文内才出现 [1][2]。
-正文配图数量目标：{image_count} 张（不含封面）；封面图：1张；配图偏好：{image_preference}
+正文配图数量目标：{image_count} 张（不含封面）；封面图：1张；配图偏好：{image_preference}；配图策略：{image_strategy}
 智能小节：{"开启" if smart_sections else "关闭"}；开启也不等于必须分点。允许 0—4 个 ## 小标题，只有当一次明显的论证转折确实值得给读者路标时才使用；小标题必须写本节的具体内容，不得使用“问题/做法/机制/影响/条件/判断”这类抽象栏目名加冒号，不得为配图或凑结构额外造标题。
 
 来源资料：
@@ -1772,7 +1786,7 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
   "markdown": "完整正文；默认以自然文章为准。智能小节开启时仍允许 0—4 个 ## 二级标题，只有确实帮助阅读时才用；禁止固定六段式和抽象栏目式小标题。",
   "coverBrief": "封面视觉语义描述",
   "imageQueries": ["封面检索词", "正文检索词1"],
-  "imageSlots": [{{"afterHeading":"必须与正文某个 ## 标题完全一致","purpose":"图片解释作用","query":"具体图片搜索词","sourceId":2}}],
+  "imageSlots": [{{"afterHeading":"正文某个 ## 标题","purpose":"图片解释作用","query":"真实图搜索词","sourceId":2,"visualIntent":"auto|real|diagram","visualType":"flow|causal|compare|layered|network|timeline|kpi|matrix|concept","visualPlan":{{"title":"图中自然标题","nodes":["节点1","节点2"]}}}}],
   "socialSummary": "120字以内简介",
   "keyClaims": [{{"claim":"核心事实或判断","sourceIds":[1],"confidence":"high|medium|low"}}],
   "riskNotes": ["需要复核的点"],
@@ -1785,7 +1799,8 @@ AI 套话抑制：{'严格' if ai_cliche_guard else '常规'}
 3. 小标题数量是否真的有必要；若去掉小标题文章更顺，就减少或取消。凡保留的小标题都要具体、有信息量，且下面必须有完整论证。
 4. 没有来源时绝不编造具体事实；有来源时具体事实尽量紧跟编号。
 5. 配图检索词必须是“可被图片搜索引擎检索到的具体实体/场景/项目/机构活动”，禁止“蓝色科技背景”之类泛词。
-6. 如果正文某个配图位对应一个由来源资料支撑的具体案例、新闻事件、政策发布或机构活动，imageSlots 中必须填写该资料的 sourceId；系统会优先回到这条源新闻/源材料找原图。只有纯概念性、没有单一来源对应的配图位才省略 sourceId 或填 0。"""
+6. 具体案例/新闻/政策活动优先 visualIntent=real 并填写 sourceId；流程、因果、对比、分层、时间线、主体关系、数理/指标分析优先 visualIntent=diagram，并选择合适 visualType。普通段落用 auto。visualPlan 只给 3—6 个短节点/时间/对比项，必须来自正文或来源事实，禁止编造数字。
+7. visualPlan 只是绘图策划，不要为了画图改变正文结构，也不要额外制造小标题。"""
     max_tokens = max(3600, int(length_spec["target"] * 1.38) + 420)
     result = deepseek.generate_json(system_prompt, user_prompt, max_tokens=max_tokens, temperature=0.58, reasoning_effort=reasoning_effort)
     meta = _pop_meta(result)
@@ -1992,12 +2007,61 @@ def _sanitize_article(article: dict[str, Any], query: str) -> dict[str, Any]:
     article["markdown"] = _strip_reference_section(markdown)
     article["coverBrief"] = str(article.get("coverBrief") or f"{query} 真实产业、政策或研究场景")[:500]
     article["imageQueries"] = [str(x)[:140] for x in (article.get("imageQueries") or [query])[:9]]
-    article["imageSlots"] = [x for x in (article.get("imageSlots") or []) if isinstance(x, dict)][:8]
+    article["imageSlots"] = _sanitize_image_slots(article.get("imageSlots"))
     article["socialSummary"] = str(article.get("socialSummary") or article["deck"])[:240]
     article["keyClaims"] = list(article.get("keyClaims") or [])[:12]
     article["riskNotes"] = list(article.get("riskNotes") or [])[:10]
     article["sourceNotes"] = list(article.get("sourceNotes") or [])[:12]
     return article
+
+
+def _sanitize_image_slots(raw: Any) -> list[dict[str, Any]]:
+    allowed_types = {"flow", "causal", "compare", "layered", "network", "timeline", "kpi", "matrix", "concept"}
+    out: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw[:8]:
+        if not isinstance(item, dict):
+            continue
+        intent = str(item.get("visualIntent") or "auto").strip().lower()
+        if intent not in {"auto", "real", "diagram"}:
+            intent = "auto"
+        visual_type = str(item.get("visualType") or "").strip().lower()
+        if visual_type not in allowed_types:
+            visual_type = ""
+        plan = item.get("visualPlan") if isinstance(item.get("visualPlan"), dict) else {}
+        clean_plan: dict[str, Any] = {}
+        for key in ("title", "center", "relation", "leftTitle", "rightTitle", "xLabel", "yLabel"):
+            if plan.get(key) not in (None, ""):
+                clean_plan[key] = str(plan.get(key))[:80]
+        for key in ("nodes", "steps", "items", "causes", "layers", "subtitles", "actors", "entities", "left", "right", "before", "after", "quadrants"):
+            value = plan.get(key)
+            if isinstance(value, list):
+                clean_plan[key] = [str(x.get("label") or x.get("title") or x.get("name") or x)[:80] if isinstance(x, dict) else str(x)[:80] for x in value[:6]]
+        for key in ("events", "metrics", "numbers"):
+            value = plan.get(key)
+            if isinstance(value, list):
+                rows = []
+                for row in value[:6]:
+                    if isinstance(row, dict):
+                        rows.append({str(k)[:24]: str(v)[:80] for k, v in list(row.items())[:5]})
+                    else:
+                        rows.append(str(row)[:80])
+                clean_plan[key] = rows
+        try:
+            source_id = max(0, int(item.get("sourceId") or 0))
+        except (TypeError, ValueError):
+            source_id = 0
+        out.append({
+            "afterHeading": str(item.get("afterHeading") or "")[:180],
+            "purpose": str(item.get("purpose") or "解释本节核心信息")[:180],
+            "query": str(item.get("query") or "")[:140],
+            "sourceId": source_id,
+            "visualIntent": intent,
+            "visualType": visual_type,
+            "visualPlan": clean_plan,
+        })
+    return out
 
 
 def _strip_internal_artifacts(markdown: str) -> str:

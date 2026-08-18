@@ -60,11 +60,12 @@
           <div class="settings-title"><span>03</span><div><strong>自动配图与可信度</strong><small>图片会直接进入正文，也会嵌入 Word / PDF。</small></div></div>
           <div class="form-grid two-col">
             <label><span>正文配图 <small class="field-note">封面图不计入数量</small></span><select id="imageCount"><option value="0">正文不配图（仍生成封面）</option><option value="1">1 张</option><option value="2">2 张</option><option value="3" selected>3 张</option><option value="4">4 张</option><option value="5">5 张</option><option value="custom">自定义</option></select><input id="customImageCount" class="custom-number" type="number" min="0" max="8" value="3" hidden aria-label="自定义正文配图数量"></label>
+            <label><span>配图策略</span><select id="imageStrategy"><option value="smart" selected>智能混合（默认）</option><option value="real_first">真实图片优先</option><option value="diagram_first">解释图优先</option><option value="all_diagram">全部代码绘图</option><option value="real_only">仅真实图片</option></select><small class="select-help" id="imageStrategyHelp">智能混合：案例、新闻先找原图；流程、机制、数理分析优先绘制；真实图不可靠时自动用代码解释图兜底。</small></label>
             <label><span>图片偏好</span><select id="imagePreference"><option>混合</option><option>真实产业场景</option><option>政策发布与机构活动</option><option>数据基础设施与机房</option><option>图表与信息图</option><option>城市与数字经济场景</option></select></label>
             <label><span>匹配精度</span><select id="imageMatchMode"><option value="precise" selected>精准匹配（默认）</option><option value="balanced">均衡匹配</option></select></label>
             <label><span>图片来源</span><select id="imageSourcePolicy"><option value="balanced">相关性优先</option><option value="authority">原始报道 / 权威来源优先</option></select></label>
           </div>
-          <div class="image-provider-status" id="imageProviderStatus"><span class="mini-spinner"></span><div><strong>正在检测图片搜索服务</strong><small>图片检索统一使用 Serper / Google Images；新闻与政策仍由 Tavily 负责。</small></div></div>
+          <div class="image-provider-status" id="imageProviderStatus"><span class="mini-spinner"></span><div><strong>正在检测配图服务</strong><small>真实图片优先回源新闻 / Serper；流程、机制与数理分析可由本地代码视觉引擎直接绘制。</small></div></div>
           <div class="toggle-stack"><label class="toggle-row"><span><strong>正文标注来源编号</strong><small>默认不标；需要严谨溯源时再开启 [1][2]</small></span><input id="citationToggle" type="checkbox"><i></i></label><label class="toggle-row"><span><strong>事实核验提醒</strong><small>标记需要人工再确认的内容</small></span><input id="factToggle" type="checkbox" checked><i></i></label></div>
         </div>
 

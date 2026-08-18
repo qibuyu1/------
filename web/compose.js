@@ -68,6 +68,21 @@
     return Math.max(0, Math.min(8, Number.isFinite(raw) ? Math.floor(raw) : 3));
   }
 
+  function syncImageStrategyControls() {
+    const strategy = $("#imageStrategy")?.value || "smart";
+    const help = $("#imageStrategyHelp");
+    const helpMap = {
+      smart: "智能混合：案例、新闻先找原图；流程、机制、数理分析优先绘制；真实图不可靠时自动用代码解释图兜底。",
+      real_first: "真实图片优先：先查源新闻和网络图；该位置始终没有可靠图片时，再用代码解释图补足。",
+      diagram_first: "解释图优先：流程、因果、对比、分层、时间线、指标分析更积极地直接绘制；具体新闻案例仍尽量保留真实图。",
+      all_diagram: "全部代码绘图：正文不调用 Serper 图片搜索，所有图片由本地受控视觉引擎绘制；新闻事实仍来自证据，不伪造现场照片。",
+      real_only: "仅真实图片：只使用源新闻 / 源材料原图和 Serper 网络图片，找不到可靠图片就留空，不用代码图兜底。",
+    };
+    if (help) help.textContent = helpMap[strategy] || helpMap.smart;
+    const codeOnly = strategy === "all_diagram";
+    ["#imagePreference", "#imageMatchMode", "#imageSourcePolicy"].forEach((id) => { const el = $(id); if (el) el.disabled = codeOnly; });
+  }
+
   let composeHeightObserver = null;
   function syncComposeColumnHeight() {
     const workspace = $(".compose-workspace");
@@ -233,17 +248,29 @@
       <section class="analysis-section"><h3>事实与风险提醒</h3>${risks.map((r) => `<div class="risk-line">${GovernanceApp.escapeHtml(r)}</div>`).join("")}</section>`;
 
     const visuals = article.visuals || []; const sources = article.sourceList || []; const vr = article.visualReport || {};
+    const strategyLabels = { smart: "智能混合", real_first: "真实图片优先", diagram_first: "解释图优先", all_diagram: "全部代码绘图", real_only: "仅真实图片" };
+    const strategyLabel = strategyLabels[vr.strategy || article.generationMeta?.writingSpec?.imageStrategy] || "智能混合";
+    const realCount = Number(vr.realPlaced || 0); const diagramCount = Number(vr.generatedDiagram || 0);
     const providerText = article.visualStatus === "pending"
-      ? "正在匹配来源原图 / Serper"
-      : (vr.bodyPlaced ? `封面 ${(vr.coverPlaced || 0)} + 正文 ${(vr.bodyPlaced || 0)} · 来源原图优先` : (vr.generatedCover ? "封面已按标题语义生成 · 正文未命中可靠图片" : "未命中可靠正文图片"));
+      ? `正在执行${strategyLabel}`
+      : `封面 ${Number(vr.coverPlaced || 0)} + 正文 ${Number(vr.bodyPlaced || 0)} · 真实图 ${realCount} · 代码图 ${diagramCount}`;
     const visualRows = visuals.map((v, i) => {
       const preview = GovernanceApp.previewImageUrl(v.image?.url || "");
       const sourceUrl = GovernanceApp.safeUrl(v.image?.sourceUrl);
-      const provider = v.matchedBy === "unresolved" ? "未命中可靠图片" : ((v.image?.provider === "source-origin" || v.image?.provider === "source-meta") ? "源新闻/源材料页面图" : (v.image?.provider === "serper" ? "Serper / Google Images" : (v.kind === "cover" ? "系统封面" : (v.image?.provider || ""))));
+      const unresolved = String(v.matchedBy || "").startsWith("unresolved") || !v.image;
+      let provider = "";
+      if (unresolved) provider = "未命中可靠图片";
+      else if (v.image?.provider === "source-origin" || v.image?.provider === "source-meta") provider = "源新闻/源材料页面图";
+      else if (v.image?.provider === "serper") provider = "Serper / Google Images";
+      else if (v.image?.provider === "generated-diagram") provider = `系统代码绘图${v.image?.generatedKind ? ` · ${v.image.generatedKind}` : ""}`;
+      else if (v.kind === "cover" || v.image?.provider === "generated-cover") provider = "系统代码封面";
+      else provider = v.image?.provider || "";
       const sourceBinding = v.sourceId ? ` · 优先绑定来源 [${GovernanceApp.escapeHtml(v.sourceId)}]` : "";
-      return `<div class="visual-audit-row"><span>${String(i + 1).padStart(2, "0")}</span><div class="visual-audit-content">${preview !== "#" ? `<img class="visual-audit-thumb" src="${preview}" alt="${GovernanceApp.escapeHtml(v.image?.description || v.purpose || "文章配图")}" loading="lazy">` : ""}<div><strong>${GovernanceApp.escapeHtml(v.kind === "cover" ? "文章封面" : `置于「${v.afterHeading || "正文"}」之后`)}</strong><p>${GovernanceApp.escapeHtml(v.purpose || "语义配图")}</p><small>${provider ? `${GovernanceApp.escapeHtml(provider)} · ` : ""}${GovernanceApp.escapeHtml(v.query || "")}${sourceBinding}${v.image?.source ? ` · ${GovernanceApp.escapeHtml(v.image.source)}` : ""}${v.image?.matchScore ? ` · 匹配 ${GovernanceApp.escapeHtml(v.image.matchScore)}` : ""}${v.image?.width ? ` · ${GovernanceApp.escapeHtml(v.image.width)}×${GovernanceApp.escapeHtml(v.image.height)}` : ""}${sourceUrl !== "#" ? ` · <a href="${sourceUrl}" target="_blank" rel="noopener noreferrer">图片来源 ↗</a>` : ""}</small></div></div></div>`;
+      const reason = v.image?.generationReason ? ` · 绘图原因 ${GovernanceApp.escapeHtml(v.image.generationReason)}` : "";
+      return `<div class="visual-audit-row"><span>${String(i + 1).padStart(2, "0")}</span><div class="visual-audit-content">${preview !== "#" ? `<img class="visual-audit-thumb" src="${preview}" alt="${GovernanceApp.escapeHtml(v.image?.description || v.purpose || "文章配图")}" loading="lazy">` : ""}<div><strong>${GovernanceApp.escapeHtml(v.kind === "cover" ? "文章封面" : `置于「${v.afterHeading || "正文"}」之后`)}</strong><p>${GovernanceApp.escapeHtml(v.purpose || "语义配图")}</p><small>${provider ? `${GovernanceApp.escapeHtml(provider)} · ` : ""}${GovernanceApp.escapeHtml(v.query || "")}${sourceBinding}${reason}${v.image?.source ? ` · ${GovernanceApp.escapeHtml(v.image.source)}` : ""}${v.image?.matchScore ? ` · 匹配 ${GovernanceApp.escapeHtml(v.image.matchScore)}` : ""}${v.image?.width ? ` · ${GovernanceApp.escapeHtml(v.image.width)}×${GovernanceApp.escapeHtml(v.image.height)}` : ""}${sourceUrl !== "#" ? ` · <a href="${sourceUrl}" target="_blank" rel="noopener noreferrer">图片来源 ↗</a>` : ""}</small></div></div></div>`;
     }).join("");
-    $("#visualPanel").innerHTML = `<section class="analysis-section"><h3>自动配图计划 · ${GovernanceApp.escapeHtml(providerText)}</h3>${vr.fallback ? `<div class="length-warning">有 ${GovernanceApp.escapeHtml(vr.fallback)} 个正文位置未找到可靠图片；系统不会拿无关图片凑数。</div>` : ""}${visualRows || `<p class="muted">本次未返回配图计划。</p>`}</section>
+    const fallbackNote = vr.fallback ? `<div class="length-warning">仍有 ${GovernanceApp.escapeHtml(vr.fallback)} 个图片位没有完成。${(vr.strategy === "real_only") ? "当前是‘仅真实图片’，因此系统不会用代码图补足。" : "系统已尝试来源原图、网络图片和代码解释图；建议查看该位置的内容是否本身不适合配图。"}</div>` : "";
+    $("#visualPanel").innerHTML = `<section class="analysis-section"><h3>自动配图计划 · ${GovernanceApp.escapeHtml(providerText)}</h3><div class="spec-chips"><span>策略：${GovernanceApp.escapeHtml(strategyLabel)}</span><span>真实图：${GovernanceApp.escapeHtml(realCount)}</span><span>代码图：${GovernanceApp.escapeHtml(diagramCount)}</span></div>${fallbackNote}${visualRows || `<p class="muted">本次未返回配图计划。</p>`}</section>
       <section class="analysis-section"><h3>参考来源 · ${sources.length}</h3>${sources.map((s) => `<div class="source-audit-row"><span>[${s.n}]</span><div>${s.url ? `<a href="${GovernanceApp.safeUrl(s.url)}" target="_blank" rel="noopener noreferrer">${GovernanceApp.escapeHtml(s.title)}</a>` : `<strong>${GovernanceApp.escapeHtml(s.title)}</strong>`}<small>${s.origin === "upload" ? "上传文件 · " : ""}${GovernanceApp.escapeHtml(s.source || "来源")}${s.publishedAt ? ` · ${GovernanceApp.formatDate(s.publishedAt)}` : ""}${s.sourceImages?.length ? ` · 已提取 ${GovernanceApp.escapeHtml(s.sourceImages.length)} 张来源页图片候选` : ""}</small></div></div>`).join("")}</section>`;
   }
 
@@ -291,7 +318,7 @@
           structure: $("#structureSelect").value, closingMode: $("#closingMode").value, opener: $("#openerSelect").value,
           paragraphRhythm: $("#rhythmSelect").value, evidenceStyle: $("#evidenceStyle").value, qualityMode: $("#qualityMode").value,
           aiClicheGuard: $("#clicheToggle").checked, smartSections: $("#smartSectionsToggle").checked, autoEvidence, bodyImageCount: getBodyImageCount(), imagePreference: $("#imagePreference").value,
-          imageMatchMode: $("#imageMatchMode").value, imageSourcePolicy: $("#imageSourcePolicy").value, citations: $("#citationToggle").checked, factCheck: $("#factToggle").checked,
+          imageStrategy: $("#imageStrategy")?.value || "smart", imageMatchMode: $("#imageMatchMode").value, imageSourcePolicy: $("#imageSourcePolicy").value, citations: $("#citationToggle").checked, factCheck: $("#factToggle").checked,
         },
       }, { signal: state.controller.signal });
       state.article = article; syncAutoEvidenceFromArticle(article); renderArticle(article); renderInsights(article); enableActions(true, article.visualStatus !== "pending"); $("#undoRevision").disabled = !(article.historyDepth > 0); switchTab("preview");
@@ -319,7 +346,7 @@
         renderArticle(latest); renderInsights(latest);
         const status = latest.visualStatus || "ready";
         if (status === "pending") {
-          setComposeProgress(92, "Serper 正在匹配真实配图；正文已经可以正常阅读。", "正在配图");
+          setComposeProgress(92, "正在按所选策略匹配源图、网络图或本地解释图；正文已经可以正常阅读。", "正在配图");
           visualPollTimer = setTimeout(poll, 1200);
         } else {
           enableActions(true, status !== "pending");
@@ -328,7 +355,7 @@
             GovernanceApp.toast(`配图完成：封面 ${latest.visualReport?.coverPlaced || 0} + 正文 ${latest.visualReport?.bodyPlaced || 0}`);
           } else if (status === "error") {
             finishComposeProgress("文章已完成，但配图服务暂未完成。", "文章完成");
-            GovernanceApp.toast("文章已完成；配图未能全部匹配，不会使用示意图冒充真实图片");
+            GovernanceApp.toast("文章已完成；部分配图处理失败，可在“配图与来源”里查看具体位置");
           }
         }
       } catch {}
@@ -450,9 +477,9 @@
     try {
       state.health = await GovernanceApp.getHealth();
       if (state.health.serperImagesConfigured) {
-        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>图片搜索：Serper / Google Images 已连接</strong><small>所有文章配图只走 Serper；Tavily 不再参与图片检索。</small></div>`;
+        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>混合配图已就绪：源新闻 + Serper + 本地代码绘图</strong><small>真实案例优先回到来源页面找原图；结构化分析可直接画；找不到可靠真实图时再绘制解释图。</small></div>`;
       } else {
-        el.className = "image-provider-status warn"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>Serper 图片搜索未配置</strong><small>当前不使用示意图；请在 .env 填 SERPER_API_KEY 并重启后，才能自动插入真实图片。</small></div>`;
+        el.className = "image-provider-status ready"; el.innerHTML = `<span class="mini-spinner"></span><div><strong>本地代码视觉引擎已就绪 · Serper 未配置</strong><small>仍可使用智能混合 / 解释图优先 / 全部代码绘图；若希望补充真实网络图片，再在 .env 配置 SERPER_API_KEY。</small></div>`;
       }
       const llm = $("#generationApiStatus");
       if (state.health.deepseekConfigured) {
@@ -490,7 +517,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    state.sources = GovernanceApp.loadEvidence(); state.topic = GovernanceApp.loadTopic() || "数据要素"; $("#topicInput").value = state.topic; renderSources(); initComposeColumnSync(); loadProviderStatus(); restoreDraftIfAvailable();
+    state.sources = GovernanceApp.loadEvidence(); state.topic = GovernanceApp.loadTopic() || "数据要素"; $("#topicInput").value = state.topic; renderSources(); initComposeColumnSync(); syncImageStrategyControls(); loadProviderStatus(); restoreDraftIfAvailable();
     $("#sourceList").addEventListener("click", (e) => { const b = e.target.closest("[data-remove-source]"); if (!b) return; state.sources = state.sources.filter((s) => s.id !== b.dataset.removeSource); GovernanceApp.saveEvidence(state.sources); renderSources(); });
     const zone = $("#uploadZone"); zone.addEventListener("click", () => $("#fileInput").click()); zone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") $("#fileInput").click(); });
     zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("dragging"); }); zone.addEventListener("dragleave", () => zone.classList.remove("dragging")); zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("dragging"); uploadFiles(e.dataTransfer.files); }); $("#fileInput").addEventListener("change", (e) => uploadFiles(e.target.files));
@@ -499,6 +526,7 @@
     $("#articlePreview").addEventListener("click", (e) => { const el = e.target.closest(".editable-block"); if (el) { selectEditableBlock(el); if (!$("#revisionPanel").hidden) updateRevisionTarget(); } }); $("#articlePreview").addEventListener("mouseup", () => setTimeout(captureTextSelection, 0));
     $("#reviseButton").addEventListener("click", openRevision); $("#closeRevision").addEventListener("click", () => $("#revisionPanel").hidden = true); $("#applyRevision").addEventListener("click", applyRevision); $("#undoRevision").addEventListener("click", () => revisionAction("/api/article/undo", "已撤回上一次修改")); $("#restoreOriginal").addEventListener("click", () => revisionAction("/api/article/restore", "已恢复到初稿；刚才的版本仍可通过撤回找回"));
     $("#imageCount")?.addEventListener("change", (e) => { const custom = e.target.value === "custom"; const input = $("#customImageCount"); if (input) input.hidden = !custom; });
+    $("#imageStrategy")?.addEventListener("change", syncImageStrategyControls);
     $("#copyButton").addEventListener("click", copyWechat); $("#htmlButton").addEventListener("click", downloadHtml); $("#docxButton").addEventListener("click", () => exportFile("docx")); $("#pdfButton").addEventListener("click", () => exportFile("pdf")); $("#mdButton").addEventListener("click", downloadMarkdown);
   });
 })();
