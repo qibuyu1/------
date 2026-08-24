@@ -33,6 +33,13 @@ DATA_CONTEXT_TERMS = {
 }
 CONSUMER_TECH_DISTRACTIONS = {"笔记本", "显卡", "CPU", "Intel", "AMD", "手机评测", "游戏本", "装机", "跑分", "壁纸"}
 
+# v35: narrative concepts that require a designed explanation instead of a random
+# technology image. These are intentionally separated from event/news imagery.
+_MECHANISM_DIAGRAM_TERMS = (
+    "底层逻辑", "演进", "闭环", "全生命周期", "价值链", "产业链",
+    "从.*到.*", "为什么", "如何", "影响", "作用机制", "路径",
+)
+
 # Image search needs a different ontology from document retrieval. A paragraph
 # titled“数据治理如何影响普通人”should naturally reach“个人信息保护/隐私/数字政务”
 # imagery, while“为什么数据治理总是失败”should reach“数据孤岛/数据质量/数据标准”
@@ -134,6 +141,13 @@ def _direct_diagram_decision(slot: dict[str, Any], query: str, strategy: str) ->
     if intent == "real":
         return False
     if intent == "diagram":
+        return True
+    # Explanatory paragraphs should not wait for a weak web image. Prefer a
+    # purpose-built relationship chart when the paragraph explains mechanisms,
+    # chains or impacts. This fixes the previous situation where the page had a
+    # decorative image unrelated to the text while the real explanation was not drawn.
+    explain_text = " ".join(str(slot.get(k) or "") for k in ("afterHeading", "anchorText", "contextText", "purpose"))
+    if any(x in explain_text for x in ("关系", "机制", "路径", "链路", "影响", "作用", "原因", "底层逻辑", "如何", "为什么", "闭环", "全生命周期", "价值链", "产业链")) or re.search(r"从.{1,12}到.{1,12}", explain_text):
         return True
     has_source = bool(str(slot.get("sourceHintUrl") or "").strip()) or bool(slot.get("sourceId"))
     fit = visual_fit_score(slot, query)
