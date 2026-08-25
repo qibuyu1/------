@@ -13,7 +13,7 @@ from typing import Any
 from . import deepseek, tavily, serper_search
 from .article_store import article_store
 from .cache import TTLCache
-from .content_blocks import merge_visuals_into_blocks, plan_visual_slots
+from .content_blocks import compose_figure_caption, merge_visuals_into_blocks, plan_visual_slots
 from .scoring import normalize_title
 from .query_intent import understand, local_plan, DOMAIN_HINTS
 from .brief import understand_writing_brief, local_brief
@@ -1504,6 +1504,10 @@ def _enrich_visual_plans(slots: list[dict[str, Any]], query: str, strategy: str)
     candidates=[]
     for slot in slots:
         if slot.get("kind") != "body": continue
+        # A slot that already owns a concrete cited-source image should not be
+        # force-promoted to a diagram by the planner; keep it in the real-image lane.
+        if slot.get("sourceImages") or str(slot.get("sourceHintUrl") or "").startswith(("http://", "https://")):
+            continue
         score = visual_fit_score(slot, query)
         if strategy == "all_diagram" or (strategy == "diagram_first" and score >= 35) or (strategy == "smart" and score >= 58):
             candidates.append(slot)
@@ -2362,19 +2366,14 @@ def _strip_reference_section(markdown: str) -> str:
 
 
 def _visual_caption(visual: dict[str, Any]) -> str:
+    # Cover caption delegates to the shared compose_figure_caption() so preview,
+    # DOCX and PDF never drift apart.
     image = visual.get("image") or {}
-    # The generated cover already contains the title/visual brief inside the image;
-    # repeating the title as a caption makes both preview and PDF look redundant.
-    # Provenance remains visible in the image-audit panel.
-    if str(image.get("provider") or "") == "generated-cover":
-        return ""
-    description = " ".join(str(image.get("description") or visual.get("purpose") or "文章配图").split()).strip()
-    if len(description) > 82:
-        description = description[:80].rstrip("，。；：、 ") + "…"
-    source = str(image.get("source") or "").strip()
-    if source:
-        return f"{description} · 来源：{source}"[:180]
-    return description[:120]
+    return compose_figure_caption(
+        image.get("description") or visual.get("purpose"),
+        image.get("source"),
+        provider=image.get("provider"),
+    )
 
 
 def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

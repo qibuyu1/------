@@ -12,6 +12,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from PIL import Image
 
 from .cache import TTLCache
+from .visual_gate import is_blank_image
 
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -167,7 +168,11 @@ def image_profile(url: str, *, timeout: float = 7.0) -> ImageProfile:
             # Reject icon-like assets and pathological strips. Editorial images
             # are usually landscape, but portrait figures remain allowed.
             usable = width >= 420 and height >= 230 and 0.55 <= aspect <= 3.2
-            artifact = _visual_artifact_reason(image) if usable else ""
+            artifact = ""
+            if usable:
+                artifact = _visual_artifact_reason(image)
+                if not artifact and is_blank_image(image):
+                    artifact = "blank-image"
             if artifact:
                 usable = False
             gray = image.convert("L").resize((9, 8), Image.Resampling.LANCZOS)

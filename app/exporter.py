@@ -12,11 +12,24 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from .content_blocks import compose_figure_caption
 from .image_fetch import ImageFetchError, image_bytes_for_document
 
 
 BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 SOURCE_REF_RE = re.compile(r"\[(\d+(?:\s*[,，]\s*\d+)*)\]")
+
+# Editorial palette matched to a mature Chinese reporting layout (数治周报).
+# Body copy is a deep blue-black; accent blue for subtitle/brand; muted gray for
+# captions, source lines and meta so they recede instead of fighting the text.
+_BODY_TEXT_COLOR = "172033"
+_ACCENT_COLOR = "0B57B7"
+_MUTED_COLOR = "6B7280"
+_TITLE_COLOR = "172033"
+
+# XML 1.0 forbids these control characters; drop them before escaping so a stray
+# byte in article content cannot corrupt document.xml.
+_INVALID_XML_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _show_references(article: dict[str, Any]) -> bool:
@@ -117,36 +130,42 @@ def build_docx(article: dict[str, Any], sources: list[dict[str, Any]]) -> bytes:
 
     doc = Document()
     section = doc.sections[0]
-    section.top_margin = Inches(0.74)
-    section.bottom_margin = Inches(0.70)
+    # A4 with editorial margins so Word/PDF pagination is stable and matches the
+    # reference Chinese layout; the left/right margins leave a ~6.6in text column.
+    section.page_width = Inches(8.27)
+    section.page_height = Inches(11.69)
+    section.top_margin = Inches(0.72)
+    section.bottom_margin = Inches(0.68)
     section.left_margin = Inches(0.82)
     section.right_margin = Inches(0.82)
+    content_width = section.page_width.inches - section.left_margin.inches - section.right_margin.inches
 
     styles = doc.styles
     normal = styles["Normal"]
-    # Publishing defaults: Chinese body copy uses Songti; titles/headings use
-    # Heiti. Word will use the named fonts when installed and a compatible CJK
-    # fallback otherwise. East-Asian font properties are set explicitly so the
-    # choice survives Office / WPS / LibreOffice round-trips.
+    # Chinese editorial body copy: Songti (宋体) at 小四 (12pt), line-height >=1.5,
+    # a little air after each paragraph, justified lines so CJK text flows as a
+    # clean column, and widow control so a single trailing line is never orphaned.
     normal.font.name = "SimSun"
-    normal.font.size = Pt(11.2)
-    normal.font.color.rgb = RGBColor(28, 28, 28)
+    normal.font.size = Pt(11.5)
+    normal.font.color.rgb = RGBColor.from_string(_BODY_TEXT_COLOR)
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
-    normal.paragraph_format.line_spacing = 1.68
-    normal.paragraph_format.space_after = Pt(7.5)
+    normal.paragraph_format.line_spacing = 1.5
+    normal.paragraph_format.space_after = Pt(8)
     normal.paragraph_format.widow_control = True
 
-    for style_name, size in [("Title", 24.5), ("Heading 1", 16.5), ("Heading 2", 15.8), ("Heading 3", 13.8)]:
+    for style_name, size in [("Title", 21), ("Heading 1", 15.5), ("Heading 2", 14.5), ("Heading 3", 13.5)]:
         style = styles[style_name]
         style.font.name = "SimHei"
         style._element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
         style.font.size = Pt(size)
-        style.font.color.rgb = RGBColor(18, 18, 18)
+        style.font.color.rgb = RGBColor.from_string(_TITLE_COLOR)
+        style.font.bold = True
 
     title = _article_title(article)
+    # Main headline: bold Heiti, near-black, generous spacing for a clean masthead.
     p = doc.add_paragraph(style="Title")
     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p.paragraph_format.space_after = Pt(10)
+    p.paragraph_format.space_after = Pt(6)
     run = p.add_run(title)
     run.bold = True
     run.font.name = "SimHei"
@@ -154,68 +173,94 @@ def build_docx(article: dict[str, Any], sources: list[dict[str, Any]]) -> bytes:
 
     deck = str(article.get("deck") or "").strip()
     if deck:
+        # The deck is a subtitle/lead-in: accent blue, same size as body, sitting
+        # just under the headline so the reader gets the angle before committing.
         p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(15)
+        p.paragraph_format.space_after = Pt(4)
         run = p.add_run(deck)
-        run.font.size = Pt(10.5)
-        run.font.color.rgb = RGBColor(96, 119, 138)
-        _bottom_border(p, color="CFE4F2", size="10")
+        run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor.from_string(_ACCENT_COLOR)
+        run.bold = True
+        run.font.name = "SimSun"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
+
+    # Meta line: brand + date, subtle gray, closed by a light rule beneath.
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(14)
+    run = p.add_run(f"数据要素治理 · {datetime.now().strftime('%Y-%m-%d')}")
+    run.font.size = Pt(9.5)
+    run.font.color.rgb = RGBColor.from_string(_MUTED_COLOR)
+    _bottom_border(p, color="CFE4F2", size="8")
 
     cover = article.get("coverImage")
     if isinstance(cover, dict) and cover.get("url"):
-        _docx_add_image(doc, cover, max_width_inches=6.55, max_height_inches=4.25)
+        _docx_add_image(doc, cover, max_width_inches=content_width, max_height_inches=4.1)
 
     for block in article.get("blocks") or []:
         kind = block.get("type")
         if kind == "heading":
+            # Keep the article's native #/##/### hierarchy so a level-3 heading is
+            # visibly smaller than a level-1 instead of collapsing (as the previous
+            # code did) every ##/### into a single Heading 2.
             level = max(1, min(int(block.get("level") or 2), 3))
-            # The article's markdown usually starts from ##, so normalize it visually.
-            style_name = "Heading 2" if level >= 2 else "Heading 1"
+            style_name = "Heading " + str(level)
             p = doc.add_paragraph(style=style_name)
-            p.paragraph_format.space_before = Pt(17)
-            p.paragraph_format.space_after = Pt(6)
+            p.paragraph_format.space_before = Pt(16)
+            p.paragraph_format.space_after = Pt(8)
             p.paragraph_format.keep_with_next = True
             p.paragraph_format.widow_control = True
             p.add_run(_plain_text(str(block.get("text") or ""))).bold = True
         elif kind == "paragraph":
             p = doc.add_paragraph()
-            # Standard Chinese editorial typography: first-line indent by two
-            # full-width characters (2 * 11 pt at the default body size).
-            p.paragraph_format.first_line_indent = Pt(22.4)
+            # Chinese editorial typography: first-line indent by two full-width
+            # characters (2 * 12pt), justified (no ragged right edge), widow-protected.
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p.paragraph_format.first_line_indent = Pt(23)
             p.paragraph_format.widow_control = True
             _add_docx_inline(p, str(block.get("text") or ""))
         elif kind == "bullets":
             for item in block.get("items") or []:
                 p = doc.add_paragraph(style="List Bullet")
+                p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 _add_docx_inline(p, str(item))
         elif kind == "image" and block.get("url"):
-            _docx_add_image(doc, block, max_width_inches=6.15, max_height_inches=5.65)
+            _docx_add_image(doc, block, max_width_inches=content_width, max_height_inches=5.4)
 
     if sources and _show_references(article):
-        p = doc.add_paragraph(style="Heading 2")
-        p.paragraph_format.space_before = Pt(24)
-        p.add_run("参考来源").bold = True
+        # A quiet "资料来源" block: small muted heading plus compact, low-key
+        # per-source lines so the references read as a footnote rather than a heavy
+        # section that interrupts the article's reading flow.
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(16)
+        p.paragraph_format.space_after = Pt(4)
+        r = p.add_run("资料来源")
+        r.font.size = Pt(11)
+        r.font.color.rgb = RGBColor.from_string(_MUTED_COLOR)
+        r.bold = True
         for idx, src in enumerate(sources, start=1):
             p = doc.add_paragraph()
-            p.paragraph_format.left_indent = Inches(0.05)
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p.paragraph_format.left_indent = Inches(0.15)
+            p.paragraph_format.space_after = Pt(2)
+            p.paragraph_format.line_spacing = 1.25
             label = f"[{idx}] {src.get('title') or '来源'}"
             source_url = str(src.get("url") or "")
             if source_url.startswith(("http://", "https://")):
-                _add_hyperlink(p, label, source_url, color="285D84")
+                _add_hyperlink(p, label, source_url, color="60778A")
             else:
                 run = p.add_run(label)
-                run.font.color.rgb = RGBColor.from_string("285D84")
+                run.font.color.rgb = RGBColor.from_string(_MUTED_COLOR)
             meta = " · ".join(x for x in [str(src.get("source") or ""), str(src.get("publishedAt") or "")[:10]] if x)
             if meta:
                 r = p.add_run(f"\n{meta}")
                 r.font.size = Pt(8.5)
-                r.font.color.rgb = RGBColor(123, 145, 161)
+                r.font.color.rgb = RGBColor.from_string(_MUTED_COLOR)
 
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = footer.add_run(f"数治攻关 · {datetime.now().strftime('%Y-%m-%d')}")
+    run = footer.add_run("— 数据要素治理 · 聚焦数据要素治理与价值释放 —")
     run.font.size = Pt(8)
-    run.font.color.rgb = RGBColor(140, 161, 177)
+    run.font.color.rgb = RGBColor.from_string(_ACCENT_COLOR)
 
     output = io.BytesIO()
     doc.save(output)
@@ -273,7 +318,7 @@ def _pdf_from_docx_if_available(article: dict[str, Any], sources: list[dict[str,
 def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]]) -> bytes:
     try:
         from reportlab.lib import colors
-        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import mm
@@ -300,12 +345,12 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         author="数治攻关",
     )
     base = getSampleStyleSheet()
-    title_style = ParagraphStyle("CNTitle", parent=base["Title"], fontName="STSong-Light", fontSize=22.0, leading=29, textColor=colors.HexColor("#111111"), alignment=TA_LEFT, spaceAfter=8, wordWrap="CJK")
-    deck_style = ParagraphStyle("CNDeck", parent=base["BodyText"], fontName="STSong-Light", fontSize=10.5, leading=19, textColor=colors.HexColor("#60778A"), spaceAfter=12, wordWrap="CJK")
-    heading_style = ParagraphStyle("CNHeading", parent=base["Heading2"], fontName="STSong-Light", fontSize=15.2, leading=22.8, textColor=colors.HexColor("#111111"), spaceBefore=15, spaceAfter=7, keepWithNext=True, wordWrap="CJK")
-    body_style = ParagraphStyle("CNBody", parent=base["BodyText"], fontName="STSong-Light", fontSize=11.2, leading=20.2, textColor=colors.HexColor("#1C1C1C"), firstLineIndent=22.4, spaceAfter=8.5, wordWrap="CJK")
-    caption_style = ParagraphStyle("CNCaption", parent=base["BodyText"], fontName="STSong-Light", fontSize=7.6, leading=11, textColor=colors.HexColor("#8198AA"), spaceAfter=7, wordWrap="CJK")
-    source_style = ParagraphStyle("CNSource", parent=body_style, fontSize=8.5, leading=14, textColor=colors.HexColor("#60778A"), leftIndent=4 * mm)
+    title_style = ParagraphStyle("CNTitle", parent=base["Title"], fontName="STSong-Light", fontSize=21.0, leading=29, textColor=colors.HexColor("#" + _TITLE_COLOR), alignment=TA_LEFT, spaceAfter=8, wordWrap="CJK")
+    deck_style = ParagraphStyle("CNDeck", parent=base["BodyText"], fontName="STSong-Light", fontSize=12, leading=21, textColor=colors.HexColor("#" + _ACCENT_COLOR), spaceAfter=12, wordWrap="CJK")
+    heading_style = ParagraphStyle("CNHeading", parent=base["Heading2"], fontName="STSong-Light", fontSize=14.5, leading=22, textColor=colors.HexColor("#" + _TITLE_COLOR), spaceBefore=15, spaceAfter=8, keepWithNext=True, wordWrap="CJK")
+    body_style = ParagraphStyle("CNBody", parent=base["BodyText"], fontName="STSong-Light", fontSize=11.5, leading=18, textColor=colors.HexColor("#" + _BODY_TEXT_COLOR), alignment=TA_JUSTIFY, firstLineIndent=23, spaceAfter=8, wordWrap="CJK")
+    caption_style = ParagraphStyle("CNCaption", parent=base["BodyText"], fontName="STSong-Light", fontSize=8.5, leading=13, textColor=colors.HexColor("#" + _MUTED_COLOR), alignment=TA_CENTER, spaceAfter=7, wordWrap="CJK")
+    source_style = ParagraphStyle("CNSource", parent=body_style, fontSize=8.5, leading=13.5, textColor=colors.HexColor("#" + _MUTED_COLOR), alignment=TA_LEFT, leftIndent=4 * mm)
 
     story: list[Any] = []
     title = _article_title(article)
@@ -325,10 +370,20 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         story.extend(_pdf_image_flowables(cover, 168 * mm, caption_style))
 
     blocks = list(article.get("blocks") or [])
+    # Level-aware heading styles so the PDF preserves the article's #/##/### depth.
+    heading_styles = {
+        1: ParagraphStyle("CNHeading1", parent=heading_style, fontSize=15.5, leading=24, spaceBefore=16, spaceAfter=9),
+        2: ParagraphStyle("CNHeading2", parent=heading_style, fontSize=14.5, leading=22, spaceBefore=14, spaceAfter=8),
+        3: ParagraphStyle("CNHeading3", parent=heading_style, fontSize=13.5, leading=20.5, spaceBefore=12, spaceAfter=7),
+    }
+    def _heading_style_for(block):
+        level = max(1, min(int(block.get("level") or 2), 3))
+        return heading_styles.get(level, heading_styles[2])
     block_index = 0
     while block_index < len(blocks):
         block = blocks[block_index]
         kind = block.get("type")
+        hsty = _heading_style_for(block)
         # A heading immediately followed by an image is a single editorial unit.
         # KeepTogether prevents the heading from being stranded at the bottom of
         # one page while its illustration starts the next page.
@@ -339,18 +394,18 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
                 # CondPageBreak is more deterministic here than relying only on
                 # nested KeepTogether flowables.
                 story.append(CondPageBreak(118 * mm))
-                bundle = [Paragraph(_pdf_inline(str(block.get("text") or "")), heading_style)]
+                bundle = [Paragraph(_pdf_inline(str(block.get("text") or "")), hsty)]
                 bundle.extend(_pdf_image_flowables(next_block, 168 * mm, caption_style))
                 story.append(KeepTogether(bundle))
                 block_index += 2
                 continue
         if kind == "heading":
-            story.append(Paragraph(_pdf_inline(str(block.get("text") or "")), heading_style))
+            story.append(Paragraph(_pdf_inline(str(block.get("text") or "")), hsty))
         elif kind == "paragraph":
             story.append(Paragraph(_pdf_inline(str(block.get("text") or "")), body_style))
         elif kind == "bullets":
             for item in block.get("items") or []:
-                story.append(Paragraph("• " + _pdf_inline(str(item)), ParagraphStyle("CNBullet", parent=body_style, firstLineIndent=0, leftIndent=4 * mm)))
+                story.append(Paragraph("• " + _pdf_inline(str(item)), ParagraphStyle("CNBullet", parent=body_style, firstLineIndent=0, leftIndent=4 * mm, alignment=TA_JUSTIFY)))
         elif kind == "image" and block.get("url"):
             story.extend(_pdf_image_flowables(block, 168 * mm, caption_style))
         block_index += 1
@@ -471,11 +526,43 @@ def _pdf_heiti_title_image(text: str, max_width: float) -> Any | None:
 
 
 def _xml_escape(text: str) -> str:
-    return escape(str(text or ""), quote=False)
+    # Drop control characters that are illegal in XML 1.0 so a stray byte in the
+    # article text cannot corrupt the whole document.xml.
+    return escape(_INVALID_XML_CHARS_RE.sub("", str(text or "")), quote=False)
 
 
-def _docx_picture_xml(rel_id: str, filename: str, ident: int) -> str:
-    return f'''<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:extent cx="6000000" cy="3375000"/><wp:docPr id="{ident}" name="Picture {ident}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="{escape(filename)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="3375000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'''
+def _figure_caption(block: dict[str, Any]) -> str:
+    """Figure caption for an export block; delegates to compose_figure_caption()."""
+    return compose_figure_caption(
+        block.get("description"),
+        block.get("source"),
+        caption=block.get("caption"),
+        provider=block.get("provider"),
+    )
+
+
+def _docx_picture_xml(rel_id: str, filename: str, ident: int, cx: int = 6000000, cy: int = 3375000) -> str:
+    # EMU width/height come from the caller (which reads the real pixel aspect
+    # ratio) instead of a fixed frame, so the fallback renderer never stretches
+    # a picture to a hard-coded 6.5x3.7in box.
+    return f'''<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{ident}" name="Picture {ident}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="{escape(filename)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'''
+
+def _pic_extent_emu(data: bytes, *, width_emu: int = 6000000, max_height_emu: int = 4572000) -> tuple[int, int]:
+    """Compute a picture's EMU extent preserving its aspect ratio (max 6.5x5in)."""
+    w, h = 4, 3
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            w, h = im.size
+    except Exception:
+        pass
+    if w <= 0 or h <= 0:
+        w, h = 4, 3
+    height_emu = width_emu * h / w
+    if height_emu > max_height_emu:
+        height_emu = max_height_emu
+        width_emu = max_height_emu * w / h
+    return int(width_emu), int(height_emu)
 
 
 def _build_docx_fallback(article: dict[str, Any], sources: list[dict[str, Any]]) -> bytes:
@@ -523,7 +610,9 @@ def _build_docx_fallback(article: dict[str, Any], sources: list[dict[str, Any]])
         rel = add_image_rel()
         if rel:
             rid, name = rel
-            body.append(_docx_picture_xml(rid, name, 100))
+            data = next((m[1] for m in media if m[0] == name), b"")
+            cx, cy = _pic_extent_emu(data)
+            body.append(_docx_picture_xml(rid, name, 100, cx, cy))
             if article["coverImage"].get("caption") and str(article["coverImage"].get("provider") or "") != "generated-cover":
                 body.append(paragraph(str(article["coverImage"]["caption"]), "Caption", indent=False))
 
@@ -541,7 +630,9 @@ def _build_docx_fallback(article: dict[str, Any], sources: list[dict[str, Any]])
             rel = add_image_rel()
             if rel:
                 rid, name = rel
-                body.append(_docx_picture_xml(rid, name, 100+len(body)))
+                data = next((m[1] for m in media if m[0] == name), b"")
+                cx, cy = _pic_extent_emu(data)
+                body.append(_docx_picture_xml(rid, name, 100+len(body), cx, cy))
             if block.get("caption"):
                 body.append(paragraph(str(block.get("caption")), "Caption", indent=False))
 
@@ -679,7 +770,7 @@ def _build_pdf_fallback(article: dict[str, Any], sources: list[dict[str, Any]]) 
         x = margin_x + (content_w - im.width) // 2
         page.paste(im, (x, y))
         y += im.height + 10
-        caption = "" if str(block.get("provider") or "") == "generated-cover" else str(block.get("caption") or block.get("description") or "").strip()
+        caption = _figure_caption(block)
         if caption:
             cap_lines = wrap(caption, caption_font, content_w)
             for line, _ in cap_lines[:3]:
@@ -695,7 +786,7 @@ def _build_pdf_fallback(article: dict[str, Any], sources: list[dict[str, Any]]) 
             im = Image.open(io.BytesIO(data)).convert("RGB")
             max_h = 430 if is_cover else 515
             im.thumbnail((content_w, max_h), Image.Resampling.LANCZOS)
-            caption = str(block.get("caption") or block.get("description") or "").strip()
+            caption = _figure_caption(block)
             cap_h = min(3, len(wrap(caption, caption_font, content_w))) * 25 if caption else 0
             return im.height + 10 + cap_h + 27
         except Exception:
@@ -787,6 +878,7 @@ def _docx_add_image(
     doc: Any, block: dict[str, Any], *, max_width_inches: float, max_height_inches: float = 5.65,
 ) -> None:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
     from docx.shared import Inches, Pt, RGBColor
 
     label = str(block.get("description") or block.get("caption") or "文章配图")
@@ -809,7 +901,7 @@ def _docx_add_image(
     except Exception:
         height_inches = None
 
-    caption = "" if str(block.get("provider") or "") == "generated-cover" else str(block.get("caption") or block.get("description") or "").strip()
+    caption = _figure_caption(block)
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(4)
@@ -826,11 +918,14 @@ def _docx_add_image(
     if caption:
         cp = doc.add_paragraph()
         cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cp.paragraph_format.space_after = Pt(8)
+        cp.paragraph_format.space_before = Pt(2)
+        cp.paragraph_format.space_after = Pt(9)
         cp.paragraph_format.keep_together = True
         cr = cp.add_run(caption)
-        cr.font.size = Pt(8)
-        cr.font.color.rgb = RGBColor(129, 152, 170)
+        cr.font.size = Pt(8.5)
+        cr.font.color.rgb = RGBColor.from_string(_MUTED_COLOR)
+        cr.font.name = "SimSun"
+        cr._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
 
 
 def _pdf_image_flowables(block: dict[str, Any], max_width: float, caption_style: Any) -> list[Any]:
@@ -858,7 +953,7 @@ def _pdf_image_flowables(block: dict[str, Any], max_width: float, caption_style:
         width *= scale
         height *= scale
     image = RLImage(buffer, width=width, height=height)
-    caption = "" if str(block.get("provider") or "") == "generated-cover" else str(block.get("caption") or block.get("description") or "").strip()
+    caption = _figure_caption(block)
     group: list[Any] = [Spacer(1, 3 * mm), image]
     if caption:
         group.append(Paragraph(_pdf_inline(caption), caption_style))

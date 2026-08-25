@@ -142,14 +142,13 @@ def _direct_diagram_decision(slot: dict[str, Any], query: str, strategy: str) ->
         return False
     if intent == "diagram":
         return True
-    # Explanatory paragraphs should not wait for a weak web image. Prefer a
-    # purpose-built relationship chart when the paragraph explains mechanisms,
-    # chains or impacts. This fixes the previous situation where the page had a
-    # decorative image unrelated to the text while the real explanation was not drawn.
-    explain_text = " ".join(str(slot.get(k) or "") for k in ("afterHeading", "anchorText", "contextText", "purpose"))
-    if any(x in explain_text for x in ("关系", "机制", "路径", "链路", "影响", "作用", "原因", "底层逻辑", "如何", "为什么", "闭环", "全生命周期", "价值链", "产业链")) or re.search(r"从.{1,12}到.{1,12}", explain_text):
-        return True
     has_source = bool(str(slot.get("sourceHintUrl") or "").strip()) or bool(slot.get("sourceId"))
+    # A cited real source is a zero-cost real-image lane. Do not let generic
+    # explanatory wording override it; only draw immediately when there is no
+    # concrete source to recover. A source-bound slot keeps its provenance lane.
+    explain_text = " ".join(str(slot.get(k) or "") for k in ("afterHeading", "anchorText", "contextText", "purpose"))
+    if (not has_source) and (any(x in explain_text for x in ("关系", "机制", "路径", "链路", "影响", "作用", "原因", "底层逻辑", "如何", "为什么", "闭环", "全生命周期", "价值链", "产业链")) or re.search(r"从.{1,12}到.{1,12}", explain_text)):
+        return True
     fit = visual_fit_score(slot, query)
     if strategy == "diagram_first":
         return fit >= (72 if has_source else 48)
@@ -415,6 +414,8 @@ def resolve_visuals(
             continue
         if str(slot.get("slotId") or "") in direct_diagram_ids:
             resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason=f"{strategy}-direct")
+            if resolved[slot["slotId"]].get("image", {}).get("blankFallback"):
+                warnings.append("代码示意图渲染结果接近空白，已自动改用备用模板，避免出现空白图。")
             continue
         picked, profile = pick_candidate(slot, mode=match_mode)
         if picked:
@@ -490,6 +491,8 @@ def resolve_visuals(
             continue
         if strategy != "real_only" and code_ready:
             resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason="search-fallback")
+            if resolved[slot["slotId"]].get("image", {}).get("blankFallback"):
+                warnings.append("代码示意图渲染结果接近空白，已自动改用备用模板，避免出现空白图。")
             warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到足够可靠的真实图片，已自动改为系统绘制示意图，避免拿无关图片凑数。")
             continue
         if strategy != "real_only" and not code_ready:
@@ -812,10 +815,16 @@ def _has_semantic_anchor(image: dict[str, Any], slot: dict[str, str], query: str
     # Source-origin/source-meta rows are fetched from the exact cited page. Serper
     # rows merely sharing a large media site's host are *not* exact provenance;
     # require the same page URL or a strong title match on that host.
-    exact_source_candidate = explicit_source and not _is_root_like_url(source_hint_url) and (
+    has_concrete_source = bool(source_hint_url) and not _is_root_like_url(source_hint_url)
+    at_source = (
         (provider in {"source-origin", "source-meta"} and (same_page or same_host))
         or (provider == "serper" and (same_page or (same_host and source_text_match)))
     )
+    # A model-explicit source is strong. A concrete (non-root) cited page whose own
+    # image came from the *exact same page* is also treated as provenance so a real
+    # news/case photo with a “数据”-free caption is not mis-killed. Host-only matches
+    # still need the explicit flag to avoid admitting decorative site assets.
+    exact_source_candidate = has_concrete_source and at_source and (explicit_source or same_page)
     # For a model-explicit case/news source, source provenance itself is a strong
     # semantic anchor. This lets an article about data-driven R&D use a real photo
     # from the cited laboratory/company story even when the photo caption does not
@@ -848,6 +857,11 @@ def _has_semantic_anchor(image: dict[str, Any], slot: dict[str, str], query: str
             # one precise fallback query rather than accepting decorative debris.
             if position > 6:
                 return False
+        # A model-explicit source is trusted as provenance even when the caption
+        # lacks 数据. A same-page (non-explicit) provenance match still needs a
+        # topical tie so a decorative or off-topic asset from the page is not admitted.
+        if not explicit_source and not (lexical_anchor or contextual_anchor or (source_match and strong_phrase)):
+            return False
         return True
     return lexical_anchor or contextual_anchor or (source_match and strong_phrase)
 
@@ -935,7 +949,7 @@ def _image_score(
         bad_penalty += max(0, position - 4) * 0.7
     if _requires_data_context(desired) and any(token.lower() in bad_text.lower() for token in CONSUMER_TECH_DISTRACTIONS) and not any(token.lower() in desired.lower() for token in CONSUMER_TECH_DISTRACTIONS):
         bad_penalty += 12.0
-    if _requires_data_context(desired) and not _contains_any(candidate_text, DATA_CONTEXT_TERMS) and not (bool(slot.get("sourceExplicit")) and same_source):
+    if _requires_data_context(desired) and not _contains_any(candidate_text, DATA_CONTEXT_TERMS) and not (same_page or (bool(slot.get("sourceExplicit")) and same_source)):
         bad_penalty += 10.0
     context_bonus = 4.0 if _visual_context_anchor(desired, candidate_text) else 0.0
     local_scene_bonus = 5.0 if _local_scene_anchor(slot, candidate_text) else 0.0

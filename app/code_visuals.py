@@ -22,6 +22,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from .visual_gate import is_blank_image
+
 W, H = 1600, 900
 
 _FONT_ROOTS = [
@@ -60,7 +62,12 @@ def build_cover_data_uri(title: str, brief: str = '', query: str = '') -> str:
         raise RuntimeError('本地代码视觉缺少中文字体，请安装 Noto CJK 字体后重试')
     title = ' '.join(str(title or '数据专题').split())[:84]
     brief = ' '.join(str(brief or '').split())[:96]
-    img = _build_cover(choose_cover_style(title, brief, query), title, brief or query)
+    style = choose_cover_style(title, brief, query)
+    img = _build_cover(style, title, brief or query)
+    if _is_blank_img(img):
+        # Never commit a near-blank cover; re-render the guaranteed busy network cover.
+        style = 'network'
+        img = _build_cover(style, title, brief or query)
     return _to_data_uri(img)
 
 
@@ -140,7 +147,15 @@ def build_body_visual(slot: dict[str, Any], query: str) -> dict[str, Any]:
     # evidence.  Never invent display numbers merely to fill a visual template.
     if kind == 'kpi' and not _metric_pairs(slot):
         kind = 'concept'
+    blank_fallback = False
     img = _build_body(kind, slot, query)
+    if _is_blank_img(img):
+        # A rendered diagram can be a near-blank frame when a template had no
+        # groundable content. Never commit a white image; re-render a guaranteed
+        # visible concept layout and flag it so callers can warn.
+        kind = 'concept'
+        img = _build_body(kind, slot, query)
+        blank_fallback = True
     plan = _plan(slot)
     heading = str(slot.get('afterHeading') or '正文')
     purpose = str(slot.get('purpose') or '').strip() or '系统根据该段内容绘制示意图'
@@ -149,7 +164,7 @@ def build_body_visual(slot: dict[str, Any], query: str) -> dict[str, Any]:
         'source': '系统根据本文内容绘制', 'sourceUrl': '', 'sourceTitle': heading,
         'sourceSnippet': str(slot.get('anchorText') or '')[:180], 'provider': 'generated-diagram',
         'width': W, 'height': H, 'matchScore': round(88.0 + min(10.0, visual_fit_score(slot, query) / 12), 1),
-        'generatedKind': kind, 'visualFitScore': visual_fit_score(slot, query),
+        'generatedKind': kind, 'visualFitScore': visual_fit_score(slot, query), 'blankFallback': blank_fallback,
     }
 
 
@@ -193,6 +208,15 @@ def code_visuals_available() -> bool:
 def _to_data_uri(img: Image.Image) -> str:
     out = io.BytesIO(); img.convert('RGB').save(out, format='PNG', optimize=True)
     return 'data:image/png;base64,' + base64.b64encode(out.getvalue()).decode('ascii')
+
+
+def _is_blank_img(img: Image.Image) -> bool:
+    """True when a rendered frame is effectively blank (near-white / too few colours).
+
+    Delegates to the shared visual_gate so the local drawing lane and the real-image
+    lane use the same robust blankness rule.
+    """
+    return is_blank_image(img)
 
 
 def _hex(h: str) -> tuple[int, int, int]:
@@ -268,15 +292,36 @@ def _body_base(title: str, tag: str, subtitle: str=''):
     d.line((90,224,1510,224),fill=_hex('#D8E2F0'),width=2); return img,d
 
 
+def _slot_index(slot) -> int:
+    sid = str(slot.get('slotId') or '')
+    m = re.search(r'(\d+)', sid)
+    try:
+        return int(m.group(1)) if m else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _palette(slot):
     text=' '.join(str(slot.get(k) or '') for k in ('afterHeading','anchorText','contextText','purpose','query'))
-    if any(k in text for k in ('安全','合规','隐私','个人信息')): return _THEME_PALETTES['security']
-    if any(k in text for k in ('人工智能','大模型','AI','算法','模型','语料','训练数据')): return _THEME_PALETTES['ai']
-    if any(k in text for k in ('公共数据','政务','政府','城市')): return _THEME_PALETTES['public']
-    if any(k in text for k in ('资产','入表','融资','估值','交易')): return _THEME_PALETTES['asset']
-    if any(k in text for k in ('研发','科研','实验','技术突破','技术创新')): return _THEME_PALETTES['research']
-    if any(k in text for k in ('工厂','制造','仓储','物流','供应链','产业')): return _THEME_PALETTES['industry']
-    return _THEME_PALETTES['governance']
+    # Consume an explicit palette selector if a planner supplied one (V35 style_map);
+    # otherwise fall back to topical keyword heuristics.
+    explicit = str(slot.get('palette') or '').strip()
+    base = explicit if explicit in _THEME_PALETTES else ''
+    if not base:
+        if any(k in text for k in ('安全','合规','隐私','个人信息')): base='security'
+        elif any(k in text for k in ('人工智能','大模型','AI','算法','模型','语料','训练数据')): base='ai'
+        elif any(k in text for k in ('公共数据','政务','政府','城市')): base='public'
+        elif any(k in text for k in ('资产','入表','融资','估值','交易')): base='asset'
+        elif any(k in text for k in ('研发','科研','实验','技术突破','技术创新')): base='research'
+        elif any(k in text for k in ('工厂','制造','仓储','物流','供应链','产业')): base='industry'
+        else: base='governance'
+    # In-article anti-repeat: rotate by slot index so two body slots of the same
+    # article do not share an identical colour scheme.
+    keys=list(_THEME_PALETTES)
+    try: bi=keys.index(base)
+    except ValueError: bi=0
+    chosen=keys[(bi + _slot_index(slot)) % len(keys)]
+    return _THEME_PALETTES[chosen]
 
 
 def _plan(slot): return slot.get('visualPlan') if isinstance(slot.get('visualPlan'),dict) else {}
@@ -658,7 +703,7 @@ def _body_relation(slot):
 def _body_concept(slot):
     title=_title(slot,'核心关系'); img,d=_body_base(_clean_label(title,30),'EDITORIAL','当一段话不适合真实照片时，用更克制的编辑视觉解释它'); colors=_palette(slot); nodes=_plan_list(slot,'nodes','items','concepts',max_items=4,label_limit=13) or _content_clauses(slot,max_items=4,label_limit=13)
     if not nodes: nodes=['事实输入','治理组织','可信使用','价值反馈']
-    rnd=random.Random(sum(ord(c) for c in title)%100000)
+    rnd=random.Random(1000 * (1 + _slot_index(slot)) + sum(ord(c) for c in title))
     # left: rich but deterministic abstract field
     for i in range(34):
         x=rnd.randint(120,660); y=rnd.randint(310,760); r=rnd.randint(10,28); c=colors[i%len(colors)]; d.ellipse((x-r,y-r,x+r,y+r),fill=(*_hex(c),150))

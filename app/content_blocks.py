@@ -232,16 +232,31 @@ def _image_block(visual: dict[str, Any]) -> dict[str, Any]:
     return {"type": "image", "slotId": visual.get("slotId"), "url": image.get("url"), "description": image.get("description") or visual.get("purpose") or "文章配图", "caption": _caption_for(image, visual), "source": image.get("source") or "", "sourceUrl": image.get("sourceUrl") or "", "query": visual.get("query") or "", "purpose": visual.get("purpose") or ""}
 
 
-def _caption_for(image: dict[str, Any], visual: dict[str, Any]) -> str:
-    if str(image.get("provider") or "") == "generated-cover":
+def compose_figure_caption(description: Any, source: Any = "", *, caption: Any = "", provider: Any = "") -> str:
+    # Single source of truth for figure captions (preview / DOCX / PDF).
+    # Keep an already-rendered caption; otherwise compose 图片来源： + 来源.
+    # Generated covers return "" because their title is already in the image.
+    if str(provider or "") == "generated-cover":
         return ""
-    description = " ".join(str(image.get("description") or visual.get("purpose") or "文章配图").split()).strip()
+    existing = str(caption or "").strip()
+    if existing:
+        return existing
+    description = " ".join(str(description or "文章配图").split()).strip()
     if len(description) > 82:
         description = description[:80].rstrip("，。；：、 ") + "…"
-    source = str(image.get("source") or "").strip()
+    source = str(source or "").strip()
     if source:
-        return f"{description} · 来源：{source}"[:180]
-    return description[:120]
+        return f"图片来源：{description}（来源：{source}）"[:180]
+    return f"图片来源：{description}"[:180]
+
+
+def _caption_for(image: dict[str, Any], visual: dict[str, Any]) -> str:
+    # Figure caption for a block built from an image visual.
+    return compose_figure_caption(
+        image.get("description") or visual.get("purpose"),
+        image.get("source"),
+        provider=image.get("provider"),
+    )
 
 
 def _match_heading(requested: str, headings: list[str], used: set[str]) -> str:
