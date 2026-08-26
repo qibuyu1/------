@@ -8,8 +8,9 @@ any external service. Run with the project venv from the experiment directory:
     <venv>\\python.exe scripts\\verify_layout.py
 
 Checks: body size/line-spacing/indent/justify, A4 page, #/##/### heading styles,
-图片来源 caption prefix, 资料来源 source block, picture aspect ratio, and that
-the PDF embeds/uses a CJK font without error.
+H2 numbered (01) + bold / H3 bold unnumbered, 图片来源 caption prefix,
+资料来源 source block, picture aspect ratio, and that the PDF embeds/uses a
+bold CJK font (plus the STSong CID body font) without error.
 """
 import sys, os, io, base64, re, zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,7 +28,7 @@ article = {
     "generationMeta": {"writingSpec": {"citations": True}},
     "coverImage": {"url": data_uri, "provider": "serper", "description": "数据要素治理产业场景", "caption": ""},
     "blocks": [
-        {"type": "heading", "level": 1, "text": "机制如何运转"},
+        {"type": "heading", "level": 2, "text": "机制如何运转"},
         {"type": "paragraph", "text": "数据要素治理需要把权责、质量、授权、使用和风险控制连成闭环。这是用于验证正文排版、行距、缩进与两端对齐的样例文本。"},
         {"type": "image", "url": data_uri, "description": "数据连接与可信流通示意", "source": "机构官网", "caption": ""},
         {"type": "heading", "level": 3, "text": "产业落地怎么看"},
@@ -39,6 +40,10 @@ sources = [
 ]
 
 from app.exporter import build_docx, build_pdf, _xml_escape, _build_docx_fallback
+
+# Force the ReportLab path so the bold CJK heading font registration is exercised
+# deterministically (the LibreOffice path would instead rely on Word's own fonts).
+os.environ.setdefault("DEG_PDF_ENGINE", "reportlab")
 
 docx = build_docx(article, sources)
 pdf = build_pdf(article, sources)
@@ -57,11 +62,18 @@ with zipfile.ZipFile(io.BytesIO(docx)) as z:
     print("Normal size 11.5pt (w:sz 23):", '<w:sz w:val="23"' in norm)
     print("Normal line 1.5 (w:line 360):", 'w:line="360"' in norm)
     print("Normal body color #172033:", 'w:val="172033"' in norm)
-    print("heading hierarchy H1/H3:", "Heading1" in docxml, "Heading3" in docxml)
+    print("heading hierarchy H2/H3:", "Heading2" in docxml, "Heading3" in docxml)
     print("图片来源 caption prefix:", "图片来源" in docxml)
     print("资料来源 source block:", "资料来源" in docxml)
     print("footer brand (neutral 数据要素治理):", "数据要素治理" in docxml)
     print("PDF uses CID font STSong-Light:", b"STSong-Light" in pdf)
+    # H2 numbered + bold (match 数治周报); H3 bold but unnumbered (t11).
+    h2 = re.search(r'<w:p>[\s\S]*?<w:pStyle w:val="Heading2"/>[\s\S]*?</w:p>', docxml)
+    h3 = re.search(r'<w:p>[\s\S]*?<w:pStyle w:val="Heading3"/>[\s\S]*?</w:p>', docxml)
+    print("H2 numbered '01 机制如何运转':", "01 机制如何运转" in docxml)
+    print("H2 bold (<w:b/>):", bool(h2 and "<w:b/>" in h2.group(0)))
+    print("H3 bold & unnumbered:", bool(h3 and ("<w:b/>" in h3.group(0)) and "03 " not in h3.group(0)))
+    print("PDF embeds bold TrueType font:", b"FontFile2" in pdf and any(x in pdf for x in (b"YaHei", b"SimHei", b"Noto")))
 
 # fallback renderer (python-docx unavailable) still honours aspect ratio
 fb = _build_docx_fallback(article, sources)

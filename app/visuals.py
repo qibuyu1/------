@@ -155,6 +155,20 @@ def _direct_diagram_decision(slot: dict[str, Any], query: str, strategy: str) ->
     return (not has_source) and fit >= 72
 
 
+def _body_wants_diagram(slot: dict[str, Any], query: str) -> bool:
+    """Whether a body slot is explanatory enough to draw a claim-based diagram.
+
+    Used by the fallback lane: when a paragraph has no claimable source original and
+    no strongly-aligned web image, only draw a diagram for genuinely explanatory
+    content; otherwise leave the slot empty (宁缺毋滥) instead of inserting a generic
+    unrelated image or an off-topic diagram.
+    """
+    text = " ".join(str(slot.get(k) or "") for k in ("afterHeading", "anchorText", "contextText", "purpose"))
+    if any(x in text for x in ("关系", "机制", "路径", "链路", "影响", "作用", "原因", "流程", "逻辑", "结构", "对比", "分层", "架构", "演变", "演进", "阶段", "时间线", "时间轴", "为什么", "如何", "闭环", "全生命周期", "价值链", "产业链", "主体", "协同", "生态")):
+        return True
+    return visual_fit_score(slot, query) >= 58
+
+
 def resolve_visuals(
     slots: list[dict[str, str]], query: str, *, preference: str = "", strategy: str = "smart",
     match_mode: str = "precise", source_policy: str = "balanced",
@@ -489,11 +503,15 @@ def resolve_visuals(
         if picked:
             commit(slot, picked, profile, fallback=True)
             continue
-        if strategy != "real_only" and code_ready:
+        if strategy != "real_only" and code_ready and _body_wants_diagram(slot, query):
             resolved[slot["slotId"]] = _generated_body_visual(slot, query, reason="search-fallback")
             if resolved[slot["slotId"]].get("image", {}).get("blankFallback"):
                 warnings.append("代码示意图渲染结果接近空白，已自动改用备用模板，避免出现空白图。")
-            warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到足够可靠的真实图片，已自动改为系统绘制示意图，避免拿无关图片凑数。")
+            warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到可认领的来源原图，已根据本段要点绘制解释图。")
+            continue
+        if strategy != "real_only" and code_ready and not _body_wants_diagram(slot, query):
+            warnings.append(f"“{slot.get('afterHeading') or '正文'}”没有可认领的来源原图，且该段不是解释型内容，按“宁缺毋滥”留空，未插入泛主题图片。")
+            resolved[slot["slotId"]] = {**slot, "image": None, "matchedBy": "unresolved-claim-gap"}
             continue
         if strategy != "real_only" and not code_ready:
             warnings.append(f"“{slot.get('afterHeading') or '正文'}”未找到可靠真实图片；当前环境缺少中文字体，代码绘图已停用以避免方块字，该位置留空。")
@@ -863,6 +881,10 @@ def _has_semantic_anchor(image: dict[str, Any], slot: dict[str, str], query: str
         if not explicit_source and not (lexical_anchor or contextual_anchor or (source_match and strong_phrase)):
             return False
         return True
+    if provider == "serper" and not exact_source_candidate:
+        # 认领式：泛主题 Serper 真实图必须与段落“强语义对齐”——需要段落具体短语命中
+        # 或场景/意图路由命中，不再仅凭“数据/科技”这类伞形词重叠就插入，宁缺毋滥。
+        return strong_phrase or contextual_anchor
     return lexical_anchor or contextual_anchor or (source_match and strong_phrase)
 
 
@@ -990,7 +1012,7 @@ def _generated_cover_visual(slot: dict[str, str] | None, query: str) -> dict[str
     slot = dict(slot or {"slotId": "cover", "kind": "cover", "afterHeading": "", "purpose": "文章封面视觉", "query": query})
     title = str(slot.get("coverTitle") or slot.get("query") or query).strip()
     brief = str(slot.get("coverBrief") or slot.get("purpose") or "").strip()
-    uri = build_cover_data_uri(title, brief, query)
+    uri = build_cover_data_uri(title, brief, query, slot=slot)
     image = {
         "url": uri, "description": title, "source": "系统生成封面", "sourceUrl": "",
         "sourceTitle": title, "sourceSnippet": brief, "provider": "generated-cover",

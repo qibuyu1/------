@@ -37,8 +37,6 @@ def blankness(image: Image.Image) -> tuple[float, int]:
     try:
         small = image.convert("RGB").resize(_DOWNSCALE, Image.Resampling.LANCZOS)
         raw = small.tobytes()
-        if small.mode != "RGB":
-            raw = small.convert("RGB").tobytes()
         n = small.width * small.height
         colors: set[tuple[int, int, int]] = set()
         nonwhite = 0

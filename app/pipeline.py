@@ -1530,6 +1530,48 @@ def _enrich_visual_plans(slots: list[dict[str, Any]], query: str, strategy: str)
         return {"apiCalled": False, "planned": 0, "totalTokens": 0, "warning": str(exc)[:180]}
 
 
+def _pick_cover_from_sources(sources: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return a real source-origin image to use as the article cover when available.
+
+    Preferred over a generated code cover: when the article cites a concrete
+    news/case source whose page exposes a usable hero image, use it as a
+    title-free cover banner (the document renders the title once, itself).
+    """
+    from .image_fetch import image_profile
+    from urllib.parse import urlparse as _up
+    import re as _re
+    for row in sources or []:
+        url = str(row.get("url") or "")
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        try:
+            parsed = _up(url)
+            path = _re.sub(r"/+", "/", parsed.path or "/").rstrip("/") or "/"
+            if path == "/" and not (parsed.query and _re.search(r"(?:id|article|news|content|page|doc|item)=", parsed.query, flags=_re.I)):
+                continue  # publisher homepage, not a cited article page
+        except Exception:
+            continue
+        imgs = [u for u in (row.get("sourceImages") or []) if str(u).startswith(("http://", "https://"))][:6]
+        if not imgs:
+            continue
+        for u in imgs:
+            try:
+                p = image_profile(u, timeout=6)
+            except Exception:
+                p = None
+            if p and p.usable and p.width >= 700 and p.height >= 400 and 1.0 <= p.aspect <= 2.4:
+                return {
+                    "url": u, "description": str(row.get("title") or "文章封面")[:120],
+                    "source": str(row.get("source") or "来源原图")[:160],
+                    "sourceUrl": url, "sourceTitle": str(row.get("title") or "")[:320],
+                    "sourceSnippet": str(row.get("snippet") or "")[:900],
+                    "provider": "source-origin", "width": p.width, "height": p.height,
+                    "matchScore": round(90.0 + min(10.0, p.width * p.height / 130_000), 1),
+                    "caption": "",
+                }
+    return None
+
+
 def _apply_visual_layout(
     article: dict[str, Any],
     query: str,
@@ -1637,6 +1679,17 @@ def _apply_visual_layout(
     article["coverImage"] = dict(cover_visual["image"]) if cover_visual else None
     if article.get("coverImage"):
         article["coverImage"]["caption"] = _visual_caption(cover_visual)
+    # Cover: prefer a real source-origin image; the doc renders the title once, and the
+    # cover is a pure (title-free) banner, so the title never appears twice.
+    if article.get("coverImage") and str(article["coverImage"].get("provider") or "") == "generated-cover":
+        real_cover = _pick_cover_from_sources(source_rows)
+        if real_cover:
+            article["coverImage"] = real_cover
+            for _v in visuals:
+                if _v.get("kind") == "cover":
+                    _v["image"] = real_cover
+                    _v["matchedBy"] = "source-origin-cover"
+                    break
     article["blocks"] = merge_visuals_into_blocks(str(article.get("markdown") or ""), visuals)
     article["images"] = [dict(v["image"]) for v in visuals if v.get("image")]
     provider_counts: dict[str, int] = {}

@@ -196,20 +196,28 @@ def build_docx(article: dict[str, Any], sources: list[dict[str, Any]]) -> bytes:
     if isinstance(cover, dict) and cover.get("url"):
         _docx_add_image(doc, cover, max_width_inches=content_width, max_height_inches=4.1)
 
+    h2_counter = 0
     for block in article.get("blocks") or []:
         kind = block.get("type")
         if kind == "heading":
-            # Keep the article's native #/##/### hierarchy so a level-3 heading is
-            # visibly smaller than a level-1 instead of collapsing (as the previous
-            # code did) every ##/### into a single Heading 2.
+            # Keep the article's native #/##/### hierarchy. The article's primary
+            # subheadings (H2) get a 01/02/03 number + bold (matching 数治周报);
+            # H3 is bold but unnumbered.
             level = max(1, min(int(block.get("level") or 2), 3))
             style_name = "Heading " + str(level)
+            text = _plain_text(str(block.get("text") or ""))
+            if not text.strip():
+                # Empty/blank heading: skip it rather than emitting a bare "01 " line.
+                continue
+            if level == 2:
+                h2_counter += 1
+                text = f"{h2_counter:02d} {text}"
             p = doc.add_paragraph(style=style_name)
             p.paragraph_format.space_before = Pt(16)
             p.paragraph_format.space_after = Pt(8)
             p.paragraph_format.keep_with_next = True
             p.paragraph_format.widow_control = True
-            p.add_run(_plain_text(str(block.get("text") or ""))).bold = True
+            p.add_run(text).bold = True
         elif kind == "paragraph":
             p = doc.add_paragraph()
             # Chinese editorial typography: first-line indent by two full-width
@@ -332,6 +340,9 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         pdfmetrics.getFont("STSong-Light")
     except Exception:
         pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    # Headings use a real bold CJK font when available (falling back to regular
+    # STSong-Light otherwise), so the article's subheadings read as bold.
+    heading_font = _register_pdf_heading_font() or "STSong-Light"
 
     output = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -345,9 +356,9 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         author="数治攻关",
     )
     base = getSampleStyleSheet()
-    title_style = ParagraphStyle("CNTitle", parent=base["Title"], fontName="STSong-Light", fontSize=21.0, leading=29, textColor=colors.HexColor("#" + _TITLE_COLOR), alignment=TA_LEFT, spaceAfter=8, wordWrap="CJK")
+    title_style = ParagraphStyle("CNTitle", parent=base["Title"], fontName=heading_font, fontSize=21.0, leading=29, textColor=colors.HexColor("#" + _TITLE_COLOR), alignment=TA_LEFT, spaceAfter=8, wordWrap="CJK")
     deck_style = ParagraphStyle("CNDeck", parent=base["BodyText"], fontName="STSong-Light", fontSize=12, leading=21, textColor=colors.HexColor("#" + _ACCENT_COLOR), spaceAfter=12, wordWrap="CJK")
-    heading_style = ParagraphStyle("CNHeading", parent=base["Heading2"], fontName="STSong-Light", fontSize=14.5, leading=22, textColor=colors.HexColor("#" + _TITLE_COLOR), spaceBefore=15, spaceAfter=8, keepWithNext=True, wordWrap="CJK")
+    heading_style = ParagraphStyle("CNHeading", parent=base["Heading2"], fontName=heading_font, fontSize=14.5, leading=22, textColor=colors.HexColor("#" + _TITLE_COLOR), spaceBefore=15, spaceAfter=8, keepWithNext=True, wordWrap="CJK")
     body_style = ParagraphStyle("CNBody", parent=base["BodyText"], fontName="STSong-Light", fontSize=11.5, leading=18, textColor=colors.HexColor("#" + _BODY_TEXT_COLOR), alignment=TA_JUSTIFY, firstLineIndent=23, spaceAfter=8, wordWrap="CJK")
     caption_style = ParagraphStyle("CNCaption", parent=base["BodyText"], fontName="STSong-Light", fontSize=8.5, leading=13, textColor=colors.HexColor("#" + _MUTED_COLOR), alignment=TA_CENTER, spaceAfter=7, wordWrap="CJK")
     source_style = ParagraphStyle("CNSource", parent=body_style, fontSize=8.5, leading=13.5, textColor=colors.HexColor("#" + _MUTED_COLOR), alignment=TA_LEFT, leftIndent=4 * mm)
@@ -379,11 +390,22 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
     def _heading_style_for(block):
         level = max(1, min(int(block.get("level") or 2), 3))
         return heading_styles.get(level, heading_styles[2])
+    heading_no = 0
     block_index = 0
     while block_index < len(blocks):
         block = blocks[block_index]
         kind = block.get("type")
         hsty = _heading_style_for(block)
+        # Number the article's primary subheadings (H2) 01/02/03 to match 数治周报;
+        # H3 is bold (via the heading font) but unnumbered.
+        if kind == "heading":
+            lvl = max(1, min(int(block.get("level") or 2), 3))
+            htext = _pdf_inline(str(block.get("text") or ""))
+            if lvl == 2 and htext.strip():
+                heading_no += 1
+                htext = f"{heading_no:02d} " + htext
+        else:
+            htext = _pdf_inline(str(block.get("text") or ""))
         # A heading immediately followed by an image is a single editorial unit.
         # KeepTogether prevents the heading from being stranded at the bottom of
         # one page while its illustration starts the next page.
@@ -394,13 +416,14 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
                 # CondPageBreak is more deterministic here than relying only on
                 # nested KeepTogether flowables.
                 story.append(CondPageBreak(118 * mm))
-                bundle = [Paragraph(_pdf_inline(str(block.get("text") or "")), hsty)]
+                bundle = [Paragraph(htext, hsty)] if htext.strip() else []
                 bundle.extend(_pdf_image_flowables(next_block, 168 * mm, caption_style))
                 story.append(KeepTogether(bundle))
                 block_index += 2
                 continue
         if kind == "heading":
-            story.append(Paragraph(_pdf_inline(str(block.get("text") or "")), hsty))
+            if htext.strip():
+                story.append(Paragraph(htext, hsty))
         elif kind == "paragraph":
             story.append(Paragraph(_pdf_inline(str(block.get("text") or "")), body_style))
         elif kind == "bullets":
@@ -872,6 +895,45 @@ def _load_cjk_font(path: Path, size: int):
         return ImageFont.truetype(str(path), size)
     except Exception:
         return ImageFont.truetype(str(path), size)
+
+
+def _find_cjk_bold_font() -> Path | None:
+    """Locate a bold/heavy CJK font for headings.
+
+    Prefers real bold faces (YaHei Bold, Noto Sans CJK Bold); SimHei (黑体) is a
+    heavy sans widely used for Chinese headings and is a reliable fallback.
+    """
+    return _find_cjk_font([
+        "msyhbd.ttc", "NotoSansCJK-Bold.ttc", "NotoSansCJK-Bold.ttf",
+        "simhei.ttf", "simhei.ttc", "msyh.ttc", "PingFang.ttc",
+    ])
+
+
+def _register_pdf_heading_font() -> str | None:
+    """Register a bold CJK font with ReportLab for headings.
+
+    Returns the registered font name, or None when no usable bold font is found.
+    Callers then fall back to STSong-Light (regular weight) for HTML-style <b>.
+    """
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont as RLTFFont
+    except Exception:
+        return None
+    path = _find_cjk_bold_font()
+    if path is None:
+        return None
+    name = "CJKHeading"
+    try:
+        kwargs: dict[str, Any] = {}
+        if path.suffix.lower() == ".ttc":
+            # Noto TTC collection column 2 is Simplified Chinese on many builds;
+            # YaHei / SimHei face 0 covers Simplified Chinese.
+            kwargs["subfontIndex"] = 2 if "Noto" in path.name else 0
+        pdfmetrics.registerFont(RLTFFont(name, str(path), **kwargs))
+        return name
+    except Exception:
+        return None
 
 
 def _docx_add_image(

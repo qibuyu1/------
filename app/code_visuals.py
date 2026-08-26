@@ -44,6 +44,9 @@ _THEME_PALETTES = {
     'asset': ['#206B57', '#B28A3D', '#4F79C8', '#D36A5B', '#7960C9'],
     'research': ['#1E6F80', '#6856D8', '#E38C3D', '#2A9D8F', '#D65372'],
     'industry': ['#2D63B8', '#F08B3E', '#3D8C84', '#7A63D7', '#D85A6D'],
+    'editorial': ['#C85A54', '#E0A03C', '#5B7FA6', '#7C6BA8', '#B4594F'],
+    'paper': ['#8C6A4F', '#C09A5B', '#53637B', '#A96A7B', '#6B8F71'],
+    'chart': ['#3E6FB0', '#4CAF93', '#E5A434', '#C75B7A', '#6C63C5'],
 }
 
 _ANALYTIC_TERMS = {
@@ -57,17 +60,17 @@ _ANALYTIC_TERMS = {
 }
 
 
-def build_cover_data_uri(title: str, brief: str = '', query: str = '') -> str:
+def build_cover_data_uri(title: str, brief: str = '', query: str = '', slot: dict[str, Any] | None = None) -> str:
     if not code_visuals_available():
         raise RuntimeError('本地代码视觉缺少中文字体，请安装 Noto CJK 字体后重试')
     title = ' '.join(str(title or '数据专题').split())[:84]
     brief = ' '.join(str(brief or '').split())[:96]
     style = choose_cover_style(title, brief, query)
-    img = _build_cover(style, title, brief or query)
+    img = _build_cover(style, slot, title, brief or query)
     if _is_blank_img(img):
         # Never commit a near-blank cover; re-render the guaranteed busy network cover.
         style = 'network'
-        img = _build_cover(style, title, brief or query)
+        img = _build_cover(style, slot, title, brief or query)
     return _to_data_uri(img)
 
 
@@ -123,16 +126,31 @@ def suggest_body_visual_kind(slot: dict[str, Any], query: str) -> str:
     digits = re.findall(r'\d+(?:\.\d+)?%?', text)
     if len(digits) >= 2 and any(k in text for k in ('个', '项', '条', '倍', '%', '个月', '年', '场景', '赛道', '增长', '下降', '提升')):
         return 'kpi'
-    if any(k in text for k in _ANALYTIC_TERMS['matrix']): return 'matrix'
-    if any(k in text for k in _ANALYTIC_TERMS['compare']): return 'compare'
-    if any(k in text for k in _ANALYTIC_TERMS['why']): return 'causal'
-    if any(k in text for k in _ANALYTIC_TERMS['timeline']): return 'timeline'
-    if any(k in text for k in _ANALYTIC_TERMS['network']): return 'network'
-    if any(k in text for k in _ANALYTIC_TERMS['layered']): return 'layered'
-    if any(k in text for k in _ANALYTIC_TERMS['flow']): return 'flow'
-    if any(k in text for k in ('相互作用', '依赖', '连接', '关系', '协作', '传导', '带动', '支撑')): return 'relation'
-    if any(k in text for k in ('分析', '机制', '逻辑', '框架', '价值')): return 'flow'
-    return 'concept'
+    # Collect every plausible template kind instead of returning on the first match,
+    # so a paragraph that fits several structures can be staggered across slots.
+    matched: list[str] = []
+    order = [('matrix', _ANALYTIC_TERMS['matrix']), ('compare', _ANALYTIC_TERMS['compare']),
+             ('causal', _ANALYTIC_TERMS['why']), ('timeline', _ANALYTIC_TERMS['timeline']),
+             ('network', _ANALYTIC_TERMS['network']), ('layered', _ANALYTIC_TERMS['layered']),
+             ('flow', _ANALYTIC_TERMS['flow'])]
+    for kind, terms in order:
+        if any(k in text for k in terms):
+            matched.append(kind)
+    if any(k in text for k in ('相互作用', '依赖', '连接', '关系', '协作', '传导', '带动', '支撑')):
+        matched.append('relation')
+    if any(k in text for k in ('分析', '机制', '逻辑', '框架', '价值')):
+        matched.append('flow')
+    if not matched:
+        return 'concept'
+    seen: set[str] = set(); uni: list[str] = []
+    for k in matched:
+        if k not in seen:
+            seen.add(k); uni.append(k)
+    # Anti-repeat: when multiple kinds are plausible, rotate by slot index so adjacent
+    # paragraphs of the same article do not land on the same template.
+    if len(uni) > 1:
+        return uni[_slot_index(slot) % len(uni)]
+    return uni[0]
 
 
 def should_generate_visual(slot: dict[str, Any], query: str, *, strict: bool = False) -> bool:
@@ -158,10 +176,10 @@ def build_body_visual(slot: dict[str, Any], query: str) -> dict[str, Any]:
         blank_fallback = True
     plan = _plan(slot)
     heading = str(slot.get('afterHeading') or '正文')
-    purpose = str(slot.get('purpose') or '').strip() or '系统根据该段内容绘制示意图'
+    purpose = str(slot.get('purpose') or '').strip() or '根据本段要点绘制的解释图'
     return {
-        'url': _to_data_uri(img), 'description': str(plan.get('title') or purpose)[:120],
-        'source': '系统根据本文内容绘制', 'sourceUrl': '', 'sourceTitle': heading,
+        'url': _to_data_uri(img), 'description': str(plan.get('title') or _title(slot, '根据本段要点绘制的解释图'))[:120],
+        'source': '系统根据本文要点绘制', 'sourceUrl': '', 'sourceTitle': heading,
         'sourceSnippet': str(slot.get('anchorText') or '')[:180], 'provider': 'generated-diagram',
         'width': W, 'height': H, 'matchScore': round(88.0 + min(10.0, visual_fit_score(slot, query) / 12), 1),
         'generatedKind': kind, 'visualFitScore': visual_fit_score(slot, query), 'blankFallback': blank_fallback,
@@ -261,14 +279,21 @@ def _wrap(draw, text, f, width):
 def _fit_text(draw, text, box, max_size, min_size=26, *, fill=(20,30,50), bold=True, center=False):
     x0,y0,x1,y1=box; w=x1-x0; h=y1-y0
     for size in range(max_size,min_size-1,-2):
-        f=_font(size,bold=bold); lines=_wrap(draw,text,f,w); lh=int(size*1.18)
+        f=_font(size,bold=bold); lines=_wrap(draw,text,f,w); lh=int(size*1.22)
         if len(lines)*lh<=h:
             yy=y0
             for line in lines:
                 xx=x0 + ((w-draw.textlength(line,font=f))/2 if center else 0)
                 draw.text((xx,yy),line,font=f,fill=fill); yy+=lh
             return
-    draw.text((x0,y0),_clean_label(text,28),font=_font(min_size,bold=bold),fill=fill)
+    # Could not fit at min_size within the box: wrap at min_size (multi-line) instead
+    # of hard-truncating to a single ellipsis line, so long labels stay readable.
+    f=_font(min_size,bold=bold); lines=_wrap(draw,text,f,w); lh=int(min_size*1.22)
+    for i,line in enumerate(lines[:6]):
+        yy=y0+i*lh
+        if yy+min_size>y1: break
+        xx=x0 + ((w-draw.textlength(line,font=f))/2 if center else 0)
+        draw.text((xx,yy),line,font=f,fill=fill)
 
 
 def _label(draw, xy, text, fill, *, dark=False):
@@ -282,7 +307,7 @@ def _arrow(draw,p1,p2,color,width=5):
 
 
 def _footer(draw, color=(100,120,150)):
-    draw.text((80,H-58),'数治攻关 · 数据要素治理',font=_font(21),fill=color)
+    draw.text((80,H-58),'数据要素治理',font=_font(21),fill=color)
 
 
 def _body_base(title: str, tag: str, subtitle: str=''):
@@ -314,14 +339,16 @@ def _palette(slot):
         elif any(k in text for k in ('资产','入表','融资','估值','交易')): base='asset'
         elif any(k in text for k in ('研发','科研','实验','技术突破','技术创新')): base='research'
         elif any(k in text for k in ('工厂','制造','仓储','物流','供应链','产业')): base='industry'
+        elif any(k in text for k in ('金融','基金','资本','投资','IPO','上市')): base='chart'
+        elif any(k in text for k in ('民生','生活','教育','文化','养老','就业')): base='editorial'
+        elif any(k in text for k in ('档案','历史','农业','乡村','文化')): base='paper'
         else: base='governance'
-    # In-article anti-repeat: rotate by slot index so two body slots of the same
-    # article do not share an identical colour scheme.
-    keys=list(_THEME_PALETTES)
-    try: bi=keys.index(base)
-    except ValueError: bi=0
-    chosen=keys[(bi + _slot_index(slot)) % len(keys)]
-    return _THEME_PALETTES[chosen]
+    # Anti-repeat without losing topical colour identity: keep the theme palette but
+    # rotate the accent order by slot index so adjacent paragraphs use different
+    # primary/secondary accents instead of an identical fixed colour scheme.
+    pal=list(_THEME_PALETTES[base])
+    ix=_slot_index(slot) % max(1,len(pal))
+    return pal[ix:] + pal[:ix]
 
 
 def _plan(slot): return slot.get('visualPlan') if isinstance(slot.get('visualPlan'),dict) else {}
@@ -362,12 +389,14 @@ def _flow_nodes(slot):
     rows=_plan_list(slot,'nodes','steps','items',max_items=6,label_limit=12)
     if len(rows)>=3: return rows
     text=' '.join(str(slot.get(k) or '') for k in ('anchorText','contextText','purpose','query'))
+    # 认领式优先：先用该段自身要点作为节点，只有要点不足时才回退到主题图库。
+    clauses=_content_clauses(slot,max_items=6,label_limit=12)
+    if len(clauses)>=3: return clauses
     if '资产' in text: return ['原始数据','质量治理','权属确认','资产登记','数据产品','经营应用']
     if any(k in text for k in ('研发','科研','实验')): return ['历史数据','标准整理','模型分析','候选筛选','小步验证','结果回流']
     if '公共数据' in text: return ['公共数据','目录开放','授权使用','场景开发','服务应用','效果反馈']
     if any(k in text for k in ('AI','模型','训练数据','语料')): return ['数据寻源','清洗去重','授权合规','质量评测','模型训练','效果回流']
-    clauses=_content_clauses(slot,max_items=6,label_limit=12)
-    return clauses if len(clauses)>=3 else ['业务数据','清洗标准','权属治理','数据产品','业务应用']
+    return ['业务数据','清洗标准','权属治理','数据产品','业务应用']
 
 
 def _causal_nodes(slot):
@@ -443,63 +472,74 @@ def _scene_variant(title: str, brief: str = '') -> str:
     return 'factory'
 
 
-def _build_cover(style,title,brief):
-    return {'policy':_cover_policy,'number':_cover_number,'geometric':_cover_geometric,'editorial':_cover_editorial,'scene':_cover_scene}.get(style,_cover_network)(title,brief)
+def _cover_pal(slot, title):
+    # Theme-based palette (from the slot topic) rotated by a title hash so different
+    # articles/covers get different accents instead of a fixed tech blue.
+    pal = list(_palette(slot or {}))
+    offset = sum(ord(c) for c in (title or '')) % max(1, len(pal))
+    return pal[offset:] + pal[:offset]
 
 
-def _cover_network(title,brief):
-    img=_gradient('#071B3C','#0B58C7',horizontal=True); _glow(img,(1220,220),420,'#10D9C4'); _glow(img,(980,690),500,'#7D5CFF',.18); d=ImageDraw.Draw(img)
-    for x in range(80,W,80): d.line((x,0,x,H),fill=(255,255,255,14),width=1)
-    for y in range(80,H,80): d.line((0,y,W,y),fill=(255,255,255,12),width=1)
+def _build_cover(style, slot, title, brief):
+    return {'policy':_cover_policy,'number':_cover_number,'geometric':_cover_geometric,'editorial':_cover_editorial,'scene':_cover_scene}.get(style,_cover_network)(slot, title, brief)
+
+
+def _cover_network(slot,title,brief):
+    pal=_cover_pal(slot,title)
+    img=_gradient('#0B1220','#16203D',horizontal=True); _glow(img,(1220,220),420,pal[1]); _glow(img,(980,690),500,pal[2],.18); d=ImageDraw.Draw(img)
+    for x in range(80,W,80): d.line((x,0,x,H),fill=(255,255,255,12),width=1)
+    for y in range(80,H,80): d.line((0,y,W,y),fill=(255,255,255,10),width=1)
     nodes=[(1060,160),(1280,250),(1400,430),(1230,520),(1000,450),(1140,660),(1420,700)]
     for i,p in enumerate(nodes):
         for q in nodes[i+1:]:
-            if math.dist(p,q)<320: d.line((*p,*q),fill=(125,230,255,96),width=3)
-    for x,y in nodes: d.ellipse((x-14,y-14,x+14,y+14),fill=(235,253,255,240),outline=(78,233,255,255),width=4)
-    _label(d,(88,82),'DATA GOVERNANCE','#0DD3B3',dark=True); _fit_text(d,title,(90,190,900,500),82,48,fill=(246,250,255))
-    if brief: _fit_text(d,brief[:58],(94,570,850,630),30,23,fill=(200,224,255),bold=True)
-    d.line((95,650,610,650),fill=_hex('#26E1C3'),width=8); d.text((95,688),'权属 · 质量 · 安全 · 产品 · 应用',font=_font(26,bold=True),fill=(228,239,255)); _footer(d,(170,210,244)); return img
+            if math.dist(p,q)<320: d.line((*p,*q),fill=(*_hex(pal[2]),96),width=3)
+    for x,y in nodes: d.ellipse((x-14,y-14,x+14,y+14),fill=(*_hex(pal[0]),240),outline=(*_hex(pal[1]),255),width=4)
+    _label(d,(88,82),'DATA GOVERNANCE',pal[1],dark=True)
+    d.line((95,H-150,635,H-150),fill=_hex(pal[1]),width=8)
+    _footer(d,(150,178,214)); return img
 
 
-def _cover_policy(title,brief):
-    img=_gradient('#F5F0E7','#E9F0F5',horizontal=True); _shadow_card(img,(115,90,925,810),24,(255,255,255,245),(24,42,71,45)); d=ImageDraw.Draw(img)
-    d.rectangle((115,90,925,108),fill=_hex('#8F1D2C')); d.text((170,150),'POLICY / 研究与制度',font=_font(24,bold=True),fill=_hex('#8F1D2C')); _fit_text(d,title,(170,215,830,360),62,36,fill=_hex('#1B2538'))
-    d.line((170,388,780,388),fill=_hex('#C7A56A'),width=4); _fit_text(d,brief or '制度如何真正进入企业经营',(170,430,820,490),27,21,fill=_hex('#465268'))
-    for i,row in enumerate(_policy_rows(title, brief)):
-        y=520+i*64; d.text((170,y),f'0{i+1}',font=_font(22,bold=True),fill=_hex('#A47B39')); d.text((240,y-4),row,font=_font(30,bold=True),fill=_hex('#2F3A4D'))
-    _label(d,(1030,122),'制度不是终点','#8F1D2C'); _fit_text(d,title,(1025,220,1490,500),52,34,fill=_hex('#152039')); d.text((1030,565),'确权 → 流通 → 融资 → 应用',font=_font(30,bold=True),fill=_hex('#6B5C44')); _footer(d,(100,94,84)); return img
+def _cover_policy(slot,title,brief):
+    pal=_cover_pal(slot,title)
+    img=_gradient('#F6F1E8','#EAF0F5',horizontal=True); _shadow_card(img,(115,110,925,790),26,(255,255,255,246),(24,42,71,40)); d=ImageDraw.Draw(img)
+    d.rectangle((115,110,925,128),fill=_hex(pal[1])); _label(d,(120,150),'POLICY',pal[1])
+    d.line((160,330,820,330),fill=_hex('#C7A56A'),width=4)
+    for i,c in enumerate(pal[:4]):
+        y=390+i*88; d.rounded_rectangle((160,y,760,y+64),radius=18,fill=(*_hex(c),235))
+    _footer(d,(120,112,100)); return img
 
 
-def _cover_geometric(title,brief):
-    img=_gradient('#0E1325','#1A1B46',horizontal=True); d=ImageDraw.Draw(img)
-    for x,y,r,c,a in ((1150,220,250,'#57E0C2',70),(1360,520,320,'#6B5CFF',88),(1050,690,230,'#F6AF45',55),(860,360,170,'#3E93FF',58)): d.ellipse((x-r,y-r,x+r,y+r),fill=(*_hex(c),a))
-    d.arc((930,180,1490,740),30,330,fill=_hex('#EAFBFF'),width=4); _label(d,(90,110),'CONCEPT / DATA','#F6AF45',dark=True); _fit_text(d,title,(90,220,850,500),72,44,fill=(247,250,255))
-    if brief: _fit_text(d,brief[:50],(95,555,790,615),30,23,fill=(188,201,238),bold=False)
-    d.line((95,625,520,625),fill=_hex('#57E0C2'),width=8); _footer(d,(156,171,210)); return img
+def _cover_geometric(slot,title,brief):
+    pal=_cover_pal(slot,title)
+    img=_gradient('#12142A','#1A1B46',horizontal=True); d=ImageDraw.Draw(img)
+    for x,y,r,c,a in ((1150,220,250,pal[1],70),(1360,520,320,pal[2],88),(1050,690,230,pal[3],55),(860,360,170,pal[0],58)): d.ellipse((x-r,y-r,x+r,y+r),fill=(*_hex(c),a))
+    d.arc((930,180,1490,740),30,330,fill=_hex('#EAFBFF'),width=4); _label(d,(90,110),'CONCEPT / DATA',pal[3],dark=True)
+    d.line((95,H-140,520,H-140),fill=_hex(pal[1]),width=8); _footer(d,(156,171,210)); return img
 
 
-def _cover_editorial(title,brief):
-    img=_gradient('#FBF8F2','#F0F7FB',horizontal=True); d=ImageDraw.Draw(img); colors=['#F05C5C','#F4B740','#6E57E0','#1BB9A4']; rnd=random.Random(sum(ord(c) for c in title)%100000)
+def _cover_editorial(slot,title,brief):
+    pal=_cover_pal(slot,title); img=_gradient('#FBF8F2','#F2F7FB',horizontal=True); d=ImageDraw.Draw(img)
+    rnd=random.Random(sum(ord(c) for c in title)%100000)
     for i in range(34):
-        x=rnd.randint(90,600); y=rnd.randint(160,710); r=rnd.randint(10,26); d.ellipse((x-r,y-r,x+r,y+r),fill=(*_hex(colors[i%4]),180))
-    d.polygon([(600,220),(860,330),(860,560),(600,690)],fill=_hex('#1C2A44'))
-    for i,y in enumerate((230,365,500,635)):
-        c=colors[(i+1)%4]; _shadow_card(img,(940,y,1410,y+95),20); d=ImageDraw.Draw(img); d.rounded_rectangle((965,y+20,1025,y+75),radius=14,fill=_hex(c)); d.text((1060,y+22),('标准化','可追踪','可复用','可经营')[i],font=_font(30,bold=True),fill=_hex('#1F2C43')); d.line((1235,y+50,1370,y+50),fill=_hex(c),width=7)
-    _label(d,(85,85),'EDITORIAL VISUAL','#6E57E0'); _fit_text(d,title,(85,740,1450,860),48,30,fill=_hex('#172238')); return img
+        x=rnd.randint(90,600); y=rnd.randint(180,720); r=rnd.randint(10,26); d.ellipse((x-r,y-r,x+r,y+r),fill=(*_hex(pal[i%len(pal)]),170))
+    d.polygon([(640,240),(860,350),(860,600),(640,710)],fill=_hex('#1C2A44'))
+    for i,y in enumerate((250,400,550)):
+        c=pal[(i+1)%len(pal)]; _shadow_card(img,(960,y,1410,y+86),20); d=ImageDraw.Draw(img); d.rounded_rectangle((985,y+16,1035,y+66),radius=14,fill=_hex(c)); d.line((1080,y+42,1340,y+42),fill=_hex(c),width=8)
+    _label(d,(85,85),'EDITORIAL',pal[2]); _footer(d,(120,130,150)); return img
 
 
-def _cover_number(title,brief):
-    img=Image.new('RGBA',(W,H),_hex('#F8FAFC')+(255,)); d=ImageDraw.Draw(img); d.rectangle((0,0,440,H),fill=_hex('#173B7A')); d.rectangle((440,0,465,H),fill=_hex('#FFB23F'))
+def _cover_number(slot,title,brief):
+    pal=_cover_pal(slot,title)
+    img=Image.new('RGBA',(W,H),_hex('#F8FAFC')+(255,)); d=ImageDraw.Draw(img); d.rectangle((0,0,440,H),fill=_hex(pal[0])); d.rectangle((440,0,465,H),fill=_hex(pal[3]))
     big, unit = _number_focus(title, brief)
-    d.text((78,100),'DATA × INSIGHT',font=_font(28,bold=True),fill=(214,231,255)); d.text((78,220),big[:4],font=_font(210,bold=True),fill=(255,255,255)); d.text((90,500),unit,font=_font(58,bold=True),fill=(255,255,255)); _label(d,(560,100),'数字焦点','#173B7A')
-    _fit_text(d,title,(560,200,1480,470),80,46,fill=_hex('#172238')); _fit_text(d,brief or '关键数字值得被真正看见',(565,540,1450,610),32,23,fill=_hex('#256F6B'))
-    pts=[(600,700),(760,650),(930,620),(1100,500),(1270,450),(1450,360)]; d.line(pts,fill=_hex('#FF8F3D'),width=9)
-    for p in pts: d.ellipse((p[0]-10,p[1]-10,p[0]+10,p[1]+10),fill=_hex('#173B7A'))
+    d.text((78,100),'DATA × INSIGHT',font=_font(28,bold=True),fill=(214,231,255)); d.text((78,220),big[:4],font=_font(210,bold=True),fill=(255,255,255)); d.text((90,500),unit,font=_font(58,bold=True),fill=(255,255,255)); _label(d,(560,100),'NUMBER FOCUS',pal[0])
+    pts=[(600,700),(760,650),(930,620),(1100,500),(1270,450),(1450,360)]; d.line(pts,fill=_hex(pal[3]),width=9)
+    for p in pts: d.ellipse((p[0]-10,p[1]-10,p[0]+10,p[1]+10),fill=_hex(pal[0]))
     _footer(d); return img
 
 
-def _cover_scene(title,brief):
-    variant=_scene_variant(title,brief); img=Image.new('RGBA',(W,H),_hex('#F2F6F3')+(255,)); d=ImageDraw.Draw(img)
+def _cover_scene(slot,title,brief):
+    pal=_cover_pal(slot,title); variant=_scene_variant(title,brief); img=Image.new('RGBA',(W,H),_hex('#F2F6F3')+(255,)); d=ImageDraw.Draw(img)
     # Left side is deliberately illustrative rather than pretending to be a
     # documentary photograph.  It changes by concrete scene so a hospital story
     # does not receive a warehouse silhouette.
@@ -525,11 +565,10 @@ def _cover_scene(title,brief):
             for y in (315,430,545): d.rounded_rectangle((x,y,x+85,y+55),radius=8,fill=_hex('#CFE7E5'))
     d.rectangle((0,700,W,H),fill=_hex('#CBD8DB'))
     for x in range(135,850,125):
-        d.line((x,205,x,720),fill=(*_hex('#2CB9A9'),130),width=3)
-        for y in range(255,660,118): d.ellipse((x-8,y-8,x+8,y+8),fill=_hex('#FFB54A'))
-    _shadow_card(img,(760,82,1500,818),34,(255,255,255,242),(26,53,82,26)); d=ImageDraw.Draw(img); _label(d,(830,135),'DATA IN THE REAL WORLD','#1E57D8'); _fit_text(d,title,(830,225,1450,500),64,40,fill=_hex('#162039'))
-    if brief: _fit_text(d,brief[:58],(835,540,1430,640),30,24,fill=_hex('#297A70'))
-    d.line((835,690,1375,690),fill=_hex('#D8E3EA'),width=2); d.text((835,720),{'warehouse':'仓储现场 · 库存数据 · 经营结果','city':'城市运行 · 数据联动 · 公共服务','health':'医疗场景 · 数据治理 · 服务质量'}.get(variant,'生产现场 · 数据层 · 经营结果'),font=_font(26,bold=True),fill=_hex('#536178')); _footer(d); return img
+        d.line((x,205,x,720),fill=(*_hex(pal[1]),130),width=3)
+        for y in range(255,660,118): d.ellipse((x-8,y-8,x+8,y+8),fill=_hex(pal[3]))
+    _shadow_card(img,(760,82,1500,818),34,(255,255,255,242),(26,53,82,26)); d=ImageDraw.Draw(img); _label(d,(830,135),'DATA IN THE REAL WORLD',pal[0])
+    d.line((835,690,1375,690),fill=_hex('#D8E3EA'),width=2); _footer(d); return img
 
 
 def _build_body(kind,slot,query):
