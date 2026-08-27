@@ -19,7 +19,7 @@ from .query_intent import understand, local_plan, DOMAIN_HINTS
 from .brief import understand_writing_brief, local_brief
 from .source_verify import verify_results
 from .visuals import resolve_visuals
-from .code_visuals import visual_fit_score
+from .code_visuals import visual_fit_score, build_cover_fallback_data_uri
 from .history_store import history_store
 
 
@@ -1182,45 +1182,81 @@ def _clean_title(raw: Any, query: str) -> str:
     return title[:70]
 
 
+_AI_TITLE_WORDS = (
+    "一文读懂", "深度解析", "全面解读", "全景观察", "全景解读", "正在重塑", "新范式", "新逻辑",
+    "数字化转型", "数字化浪潮", "赋能", "引领", "新趋势", "未来已来", "行业级", "一站式",
+    "全链路", "智慧化", "智能化浪潮", "转型升级", "高质量发展", "洞察",
+)
+
+
+def _is_ai_title(title: str) -> bool:
+    """Local title gate: generic/AI-style titles (empty big words, slogan phrasing).
+
+    Used by _rank_wechat_titles so a concrete headline with an object, a change or a
+    question always beats an AI-sounding headline, and the final recommendedTitle is
+    specific and motivating rather than a template slogan.
+    """
+    return any(w in title for w in _AI_TITLE_WORDS)
+
+
 def _rank_wechat_titles(titles: list[Any], query: str) -> list[str]:
     cleaned: list[str] = []
+    concrete: list[str] = []
     for raw in titles:
         title = _clean_title(raw, query)
         if not title or title in cleaned or len(title) < 10 or len(title) > 38:
             continue
         cleaned.append(title)
+        if not _is_ai_title(title):
+            concrete.append(title)
     if not cleaned:
         topic = query.strip() or "这个议题"
         return [topic[:38]]
+    # Title gate: rank only concrete candidates when any exist, so an AI-sounding
+    # headline can never beat a specific object + change/question headline.
+    pool = concrete if concrete else cleaned
 
     umbrella = query.strip() in {"数据要素治理", "数据要素"}
 
     def score(title: str) -> float:
         value = 0.0
-        # Specificity and reading motivation matter more than repeating the site theme.
-        if not umbrella and query and any(k for k in query.split() if k and k in title):
-            value += 2.0
-        if any(ch in title for ch in ("？", "意味着", "为何", "为什么", "背后", "关键", "到底")):
-            value += 1.4
-        if any(phrase in title for phrase in ("真正值得关注", "真正变化在于", "正在发生", "背后发生了什么")):
-            value -= 1.8
-        if any(phrase in title for phrase in ("一文读懂", "深度解析", "全景观察", "新逻辑", "新范式", "正在重塑", "全面解读", "全解析")):
-            value -= 2.6
-        if re.match(r"^(?:从.{1,12}到.{1,12}|为什么说|如何看待)", title):
-            value -= 0.8
+        # Title gate: hard-down-rank AI / slogan phrasing so concrete titles win.
+        if _is_ai_title(title):
+            value -= 9.0
+        # Concrete signal: specific numbers / percentages are a strong hook.
+        if re.search(r"\d", title):
+            value += 2.2
+        if re.search(r"(?:%|％|成|倍|亿|万|项|家)", title):
+            value += 1.0
+        # Reading motivation: question / conflict / change markers.
+        if any(ch in title for ch in ("？", "?", "为什么", "为何", "凭什么", "意味着", "背后", "到底", "差在哪", "怎么办")):
+            value += 1.8
+        if any(w in title for w in ("首", "首次", "升格", "落地", "上线", "拿下", "成立", "不再", "反而", "破冰", "开闸", "提速", "叫停", "曝", "开始")):
+            value += 1.6
+        # Concrete actor / object presence (policy, org, tech, market).
+        if any(w in title for w in ("政策", "文件", "央企", "国企", "地方", "全国", "企业", "平台", "机构", "部门", "银行", "大模型", "智能体", "数据局", "交易所", "算力", "语料", "模型")):
+            value += 1.1
+        # Length sweet spot for a headline.
         if 15 <= len(title) <= 30:
             value += 2.0
-        if any(w in title for w in ("政策", "企业", "平台", "数据", "AI", "产权", "公共", "交易", "安全")):
-            value += 1.0
+        # Query keyword in an umbrella query is a content placeholder, not a hook.
+        if not umbrella and query and any(k for k in query.split() if k and k in title):
+            value += 1.2
         if re.match(r"^(?:数据要素治理|数据要素)\s*[:：—|-]", title):
             value -= 6.0
-        if any(w in title for w in ("重大", "颠覆", "惊天", "必看", "震撼", "疯了", "暴涨")):
+        # Big-empty-word / slogan / clickbait penalties.
+        if any(w in title for w in ("重大", "颠覆", "惊天", "必看", "震撼", "疯了", "暴涨", "重磅")):
             value -= 5.0
-        if title.count("！") > 1:
+        if any(w in title for w in ("赋能", "引领", "加速", "浪潮", "大势", "蓝海", "风口", "未来已来", "数智", "智慧化")):
             value -= 3.0
+        if title.count("！") > 1 or "！！" in title:
+            value -= 3.0
+        # Punchy parallel / colon "A：B" templates that read as AI summaries.
+        if re.match(r"^[^，。！？]{2,10}(?:，|：|,)[^，。！？]{2,14}$", title):
+            value -= 0.6
         return value
 
-    return sorted(cleaned, key=score, reverse=True)[:5]
+    return sorted(pool, key=score, reverse=True)[:5]
 
 
 
@@ -1690,6 +1726,16 @@ def _apply_visual_layout(
                     _v["image"] = real_cover
                     _v["matchedBy"] = "source-origin-cover"
                     break
+    # 封面永远存在：若仍未产出封面(如缺中文字体或来源原图不可用)，用与字体无关的纯图形封面兜底(无标题)。
+    if not article.get("coverImage"):
+        article["coverImage"] = {
+            "url": build_cover_fallback_data_uri(), "description": "编辑型封面",
+            "source": "系统生成图形封面", "sourceUrl": "", "sourceTitle": "", "sourceSnippet": "",
+            "provider": "generated-cover", "width": 1600, "height": 900, "matchScore": 90.0, "caption": "",
+        }
+        for _v in visuals:
+            if _v.get("kind") == "cover":
+                _v["image"] = article["coverImage"]; _v["matchedBy"] = "generated-cover-fallback"; break
     article["blocks"] = merge_visuals_into_blocks(str(article.get("markdown") or ""), visuals)
     article["images"] = [dict(v["image"]) for v in visuals if v.get("image")]
     provider_counts: dict[str, int] = {}
@@ -1842,13 +1888,13 @@ def _control_instruction(
         "普通公众": "把术语翻译成日常语言，多解释‘这和普通人/企业有什么关系’，但不编造故事来凑可读性。",
     }
     title_rules = {
-        "默认 · 自然起题": "不要套任何固定标题句式，由文章最具体、最值得读的变化/冲突/影响自然起题。除非主题本身就是概念解释，否则不要机械把‘数据要素治理’放在标题开头，更禁止‘数据要素治理：——…’式前缀。",
-        "公众号吸引力型": "像成熟微信公众号标题：对象明确、变化明确、有一处值得追问或产生反差的地方；优先使用‘为什么/意味着什么/真正变化在于/背后发生了什么’这类自然钩子，但不夸张、不造势、不用营销词。",
-        "信息密度型": "标题包含主题对象 + 最重要变化/判断，不堆情绪词，不做悬念党。",
-        "问题型": "至少两个标题候选使用真实问题句，正文必须在前 1/3 明确回答问题。",
-        "趋势判断型": "标题突出正在形成的趋势和方向，但避免把不确定趋势写成既成事实。",
-        "政策解读型": "标题点出政策/制度变化及其影响对象，避免泛泛写‘重磅’‘重大利好’。",
-        "克制的吸引力": "标题要有明确对象、变化和冲突/反差中的至少两项，优先让读者产生‘为什么’或‘这意味着什么’的阅读动力；可以有判断，不靠夸张词。",
+        "默认 · 自然起题": "由文章里最具体、最值得读的‘变化/冲突/因果’自然起题；标题必须含一个具体对象（某机构/政策/技术/企业/群体）和一件正在发生的事，或一个具体反差/疑问；禁止‘数据要素治理：…’式前缀和泛泛官话，禁止‘一文读懂/深度解析/全景观察/正在重塑/新范式/新逻辑’这类空词。",
+        "公众号吸引力型": "像一个信息密度高的公众号标题：开头是具体对象，随后是一个让人想点开的变化/反差/疑问（‘为什么…’‘意味着…’这类自然钩子只能用一次）；可以有惊讶但不下结论式夸张；禁止‘一文读懂/深度解析/全景观察/正在重塑/新范式/新逻辑/数字化转型浪潮’这类空壳词。",
+        "信息密度型": "标题在 30 字内同时给出‘具体对象 + 具体数字/规模/时间 + 方向或判断’；素材里有百分比、金额、时间点、地域、数量时就自然带进标题；禁止只写大词（‘赋能/引领/转型/加速’）而不给任何具体信息。",
+        "问题型": "标题就是一个能被回答的真问题，问题里要有具体对象和具体矛盾（例：‘为什么大厂要把数据安全升成一级部门’）；不要用‘如何看待/何去何从/未来何去’这类空问句；至少两个标题候选使用真实问题句，正文前 1/3 必须明确回答。",
+        "趋势判断型": "标题给出一个有边界的趋势判断：说清谁在变、往哪个方向变、大约什么时候/什么规模；用‘正在/开始/不再/转向’这类可观察表达，不用‘必然/注定/即将彻底重塑’这类绝对词。",
+        "政策解读型": "标题点名‘哪份政策/文件/机构 + 对谁 + 改变什么’；把政策名或关键条款自然写进标题；禁止‘重磅/重大利好/一图读懂/深度解读/权威解读’这类空壳表述。",
+        "克制的吸引力": "标题克制但有动力：只用一个具体对象 + 一个具体变化或一个具体疑问；不用感叹号，不用第二人称，不堆形容词；让人看完想点开但不觉得被标题党。",
     }
     structure_rules = {
         "默认 · 按内容自然组织": "把它当成成熟编辑的自然写法，而不是结构模板：先判断全文真正需要几次转折，再决定是否使用小标题。多数文章应为 0—3 个小标题，内容本来连贯时完全可以不用；只有篇幅和证据真的需要才到 4 个。不要把正文机械拆成‘问题/做法/机制/影响/条件/判断’六段式，不要用这些抽象词加冒号充当标题，也不要让所有小标题都保持相同句式或相同长度。能用一两句过渡自然连接的地方，就合并而不是另起标题。",

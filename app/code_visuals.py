@@ -74,6 +74,30 @@ def build_cover_data_uri(title: str, brief: str = '', query: str = '', slot: dic
     return _to_data_uri(img)
 
 
+def build_cover_fallback_data_uri() -> str:
+    """A font-independent, title-free editorial cover (pure gradient/shapes).    Guarantees the document always has a cover even when no CJK font is detected
+    (so no tofu blocks). No text is drawn; the title lives only in the document.
+    """
+    pal = _THEME_PALETTES['governance']
+    img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    c1, c2 = _hex('#0B1220'), _hex('#1E3A5F')
+    for y in range(H):
+        t = y / max(1, H - 1)
+        c = _mix(c1, c2, t)
+        ImageDraw.Draw(img).line((0, y, W, y), fill=c + (255,))
+    d = ImageDraw.Draw(img)
+    # Soft, title-free abstract field (single visual focus, no text).
+    for x, y, r, col, a in ((1150, 220, 320, pal[1], 70), (1360, 520, 420, pal[2], 80), (860, 360, 240, pal[3], 60)):
+        for rr in range(r, 0, -24):
+            aa = int(255 * a * (rr / r))
+            d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=(*_hex(col), aa))
+    for gx in range(80, W, 160):
+        d.line((gx, 0, gx, H), fill=(255, 255, 255, 10))
+    for gy in range(80, H, 140):
+        d.line((0, gy, W, gy), fill=(255, 255, 255, 8))
+    return _to_data_uri(img)
+
+
 def choose_cover_style(title: str, brief: str = '', query: str = '') -> str:
     text = f'{title} {brief} {query}'
     compact = re.sub(r'\s+', '', text)

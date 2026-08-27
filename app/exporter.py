@@ -353,7 +353,7 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         topMargin=19 * mm,
         bottomMargin=18 * mm,
         title=_article_title(article),
-        author="数治攻关",
+        author="数据要素治理",
     )
     base = getSampleStyleSheet()
     title_style = ParagraphStyle("CNTitle", parent=base["Title"], fontName=heading_font, fontSize=21.0, leading=29, textColor=colors.HexColor("#" + _TITLE_COLOR), alignment=TA_LEFT, spaceAfter=8, wordWrap="CJK")
@@ -390,6 +390,7 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
     def _heading_style_for(block):
         level = max(1, min(int(block.get("level") or 2), 3))
         return heading_styles.get(level, heading_styles[2])
+    use_bold_font = heading_font != "STSong-Light"
     heading_no = 0
     block_index = 0
     while block_index < len(blocks):
@@ -401,11 +402,14 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         if kind == "heading":
             lvl = max(1, min(int(block.get("level") or 2), 3))
             htext = _pdf_inline(str(block.get("text") or ""))
+            hraw = _plain_text(str(block.get("text") or ""))
             if lvl == 2 and htext.strip():
                 heading_no += 1
                 htext = f"{heading_no:02d} " + htext
+                hraw = f"{heading_no:02d} " + hraw
         else:
             htext = _pdf_inline(str(block.get("text") or ""))
+            hraw = ""
         # A heading immediately followed by an image is a single editorial unit.
         # KeepTogether prevents the heading from being stranded at the bottom of
         # one page while its illustration starts the next page.
@@ -416,14 +420,14 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
                 # CondPageBreak is more deterministic here than relying only on
                 # nested KeepTogether flowables.
                 story.append(CondPageBreak(118 * mm))
-                bundle = [Paragraph(htext, hsty)] if htext.strip() else []
+                bundle = [_pdf_heading_flowable(htext, hraw, hsty, use_bold_font=use_bold_font, max_width=168 * mm, color=_TITLE_COLOR)] if htext.strip() else []
                 bundle.extend(_pdf_image_flowables(next_block, 168 * mm, caption_style))
                 story.append(KeepTogether(bundle))
                 block_index += 2
                 continue
         if kind == "heading":
             if htext.strip():
-                story.append(Paragraph(htext, hsty))
+                story.append(_pdf_heading_flowable(htext, hraw, hsty, use_bold_font=use_bold_font, max_width=168 * mm, color=_TITLE_COLOR))
         elif kind == "paragraph":
             story.append(Paragraph(_pdf_inline(str(block.get("text") or "")), body_style))
         elif kind == "bullets":
@@ -465,7 +469,7 @@ def _build_pdf_reportlab(article: dict[str, Any], sources: list[dict[str, Any]])
         canvas.saveState()
         canvas.setFont("STSong-Light", 7.5)
         canvas.setFillColor(colors.HexColor("#8CA1B1"))
-        canvas.drawString(21 * mm, 10 * mm, "数治攻关")
+        canvas.drawString(21 * mm, 10 * mm, "数据要素治理")
         canvas.drawRightString(A4[0] - 21 * mm, 10 * mm, f"{doc_obj.page}")
         canvas.restoreState()
 
@@ -722,7 +726,7 @@ def _build_pdf_fallback(article: dict[str, Any], sources: list[dict[str, Any]]) 
 
     def footer() -> None:
         draw.line((margin_x, H - 77, W - margin_x, H - 77), fill="#E7EEF6", width=1)
-        draw.text((margin_x, H - 58), "数治攻关", font=footer_font, fill="#8CA1B1")
+        draw.text((margin_x, H - 58), "数据要素治理", font=footer_font, fill="#8CA1B1")
         number = str(page_no)
         tw = draw.textlength(number, font=footer_font)
         draw.text((W - margin_x - tw, H - 58), number, font=footer_font, fill="#8CA1B1")
@@ -934,6 +938,80 @@ def _register_pdf_heading_font() -> str | None:
         return name
     except Exception:
         return None
+
+
+def _pdf_heading_image(text: str, *, max_width: float, font_pt: float = 14.5, color: str = "172033") -> Any | None:
+    """Render a heading as a bold CJK image when no real bold font is registered.
+
+    Uses a real bold CJK font when available; otherwise draws the text with a
+    stroke (Pillow stroke_width) so headings are ALWAYS visibly bold even on a
+    runtime with no bold TTF file — a guaranteed cross-environment fallback.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        from reportlab.platypus import Image as RLImage
+    except Exception:
+        return None
+    bold_path = _find_cjk_bold_font()
+    path = bold_path or _find_cjk_font(["msyh.ttc", "NotoSansCJK-Regular.ttc", "simhei.ttf", "PingFang.ttc", "simsun.ttc"])
+    if path is None:
+        return None
+    try:
+        px = max(18, int(round(font_pt * 2.6)))
+        font = ImageFont.truetype(str(path), px)
+    except Exception:
+        try:
+            font = ImageFont.truetype(str(path), px)
+        except Exception:
+            return None
+    canvas_w = 1600
+    pad = 8
+    max_text_w = canvas_w - pad * 2
+    measure = Image.new("RGB", (16, 16), "white")
+    md = ImageDraw.Draw(measure)
+    lines: list[str] = []
+    current = ""
+    for ch in str(text or ""):
+        if ch == "\n":
+            if current:
+                lines.append(current); current = ""
+            continue
+        cand = current + ch
+        if current and md.textlength(cand, font=font) > max_text_w:
+            lines.append(current); current = ch
+        else:
+            current = cand
+    if current:
+        lines.append(current)
+    lines = lines or [str(text or "")]
+    line_h = px + 12
+    canvas_h = max(line_h, line_h * len(lines) + 6)
+    img = Image.new("RGB", (canvas_w, canvas_h), "white")
+    d = ImageDraw.Draw(img)
+    fill = "#" + str(color).lstrip("#")[:6]
+    stroke_w = max(1, int(round(px / 26))) if bold_path is None else 0
+    y = 0
+    for line in lines:
+        d.text((pad, y), line, font=font, fill=fill, stroke_width=stroke_w, stroke_fill=fill)
+        y += line_h
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    height = max_width * canvas_h / canvas_w
+    return RLImage(buf, width=max_width, height=height)
+
+
+def _pdf_heading_flowable(htext: str, hraw: str, hsty: Any, *, use_bold_font: bool, max_width: float, color: str) -> Any:
+    """Return the heading flowable: real bold text when a bold font is available,
+    otherwise a stroke-simulated bold heading image (guaranteed bold)."""
+    if use_bold_font:
+        from reportlab.platypus import Paragraph
+        return Paragraph(htext, hsty)
+    img = _pdf_heading_image(hraw, max_width=max_width, font_pt=float(hsty.fontSize), color=color)
+    if img is not None:
+        return img
+    from reportlab.platypus import Paragraph
+    return Paragraph(htext, hsty)
 
 
 def _docx_add_image(

@@ -356,10 +356,16 @@ def resolve_visuals(
 
     used_urls: set[str] = set()
     used_fingerprints: set[str] = set()
+    used_source_ids: set[str] = set()   # a cited source real image is used at most once per article
     host_counts: dict[str, int] = {}
     resolved: dict[str, dict[str, Any]] = {}
 
     def pick_candidate(slot: dict[str, Any], *, mode: str) -> tuple[dict[str, Any] | None, ImageProfile | None]:
+        # De-dup: the exact cited source's real image may be used only once per article,
+        # so a later paragraph bound to the same source falls back to a diagram/empty.
+        sid = _slot_source_id(slot)
+        if sid and sid in used_source_ids:
+            return None, None
         candidates = results_by_slot.get(slot["slotId"], [])
         ranked = sorted(
             candidates,
@@ -409,6 +415,10 @@ def resolve_visuals(
         if host:
             host_counts[host] = host_counts.get(host, 0) + 1
         provider = str(picked.get("provider") or "web-image")
+        if provider in {"source-origin", "source-meta"}:
+            sid = _slot_source_id(slot)
+            if sid:
+                used_source_ids.add(sid)
         if fallback:
             picked["matchedByFallback"] = True
         resolved[slot["slotId"]] = {
@@ -836,7 +846,7 @@ def _has_semantic_anchor(image: dict[str, Any], slot: dict[str, str], query: str
     has_concrete_source = bool(source_hint_url) and not _is_root_like_url(source_hint_url)
     at_source = (
         (provider in {"source-origin", "source-meta"} and (same_page or same_host))
-        or (provider == "serper" and (same_page or (same_host and source_text_match)))
+        or (provider == "serper" and same_page)
     )
     # A model-explicit source is strong. A concrete (non-root) cited page whose own
     # image came from the *exact same page* is also treated as provenance so a real
@@ -882,9 +892,14 @@ def _has_semantic_anchor(image: dict[str, Any], slot: dict[str, str], query: str
             return False
         return True
     if provider == "serper" and not exact_source_candidate:
-        # 认领式：泛主题 Serper 真实图必须与段落“强语义对齐”——需要段落具体短语命中
-        # 或场景/意图路由命中，不再仅凭“数据/科技”这类伞形词重叠就插入，宁缺毋滥。
-        return strong_phrase or contextual_anchor
+        # Body Serper real images must be tightly coupled to the paragraph: allowed only
+        # when the paragraph names a very specific entity/scene AND the candidate strongly
+        # matches it. Anything else (e.g. a generic infrastructure photo for a science-data
+        # paragraph) is refused, so the image and the text refer to the same thing.
+        specific = {t for t in _semantic_terms(subject_text) if t not in GENERIC_TERMS and t not in _LOCAL_UMBRELLA_TERMS and len(_compact(t)) >= 3}
+        if not specific:
+            return False
+        return (strong_phrase or contextual_anchor) and bool(specific & candidate_terms)
     return lexical_anchor or contextual_anchor or (source_match and strong_phrase)
 
 
@@ -1091,6 +1106,19 @@ def _is_root_like_url(url: str) -> bool:
     except Exception:
         return False
 
+
+
+def _slot_source_id(slot: dict[str, Any]) -> str:
+    """A stable identity for the exact source a paragraph cites.
+
+    Used to enforce that a cited source real image is shown at most once per
+    article, so a single-source article does not repeat the same photo everywhere.
+    """
+    u = str(slot.get("sourceHintUrl") or "").strip()
+    if u and not _is_root_like_url(u):
+        return "url:" + u
+    n = str(slot.get("sourceName") or "").strip()
+    return ("name:" + n) if n else ""
 
 def _host(url: str) -> str:
     try:
